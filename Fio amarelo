@@ -1,0 +1,230 @@
+// Substitua pelos seus dados do console do Blynk
+#define BLYNK_TEMPLATE_ID   "SEU_ID_AQUI"
+#define BLYNK_TEMPLATE_NAME "NOME_DO_TEMPLATE"
+#define BLYNK_AUTH_TOKEN    "SEU_TOKEN_AQUI"
+
+#include <Arduino.h>
+#include <U8g2lib.h>
+#include <Wire.h>
+#include <ArduinoJson.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <PubSubClient.h>
+
+// --- CONFIGURAÇÕES DE REDE ---
+char ssid[] = "SEU_ID";
+char pass[] = "SUA_SENHA";
+const char* mqtt_server = "test.mosquitto.org"; 
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+// --- MAPEAMENTO DE HARDWARE ---
+#define MOTOR_PIN 25  // Saída PWM (via Optoacoplador)
+#define FG_PIN    18  // Entrada Fio Amarelo (via Optoacoplador)
+#define ENC_CLK   26  // KY-040 CLK
+#define ENC_DT    27  // KY-040 DT
+#define ENC_SW    14  // KY-040 Botão
+#define PWM_CHANNEL 0
+#define PWM_FREQ    5000
+#define PWM_RES     8
+
+// Inicialização do Display OLED SH1107 (Pimoroni/Genérico I2C)
+U8G2_SH1107_PIMORONI_128X128_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+// --- VARIÁVEIS GLOBAIS ---
+volatile int valor_pwm = 0;   
+float temperatura = 25.0;     
+volatile int16_t encoderAcumulado = 0;
+volatile unsigned long contadorPulsosFG = 0;
+int rpmReal = 0;
+int ultimoEstadoCLK;
+
+unsigned long tempoAnteriorSinc = 0; // Para Blynk/MQTT (1s)
+unsigned long tempoAnteriorSerial = 0; // Para Debug (500ms)
+
+volatile bool precisaAtualizarOLED = false;
+volatile bool travaEmergencia = false;
+
+// --- INTERRUPÇÕES (IRAM_ATTR para velocidade) ---
+
+// Conta pulsos do motor (Fio Amarelo)
+void IRAM_ATTR contarFG() {
+    contadorPulsosFG++;
+}
+
+// Processa rotação do Encoder
+void IRAM_ATTR tratarEncoder() {
+    int sCLK = digitalRead(ENC_CLK);
+    int sDT  = digitalRead(ENC_DT);
+    if (sCLK != ultimoEstadoCLK) {
+        if (sDT != sCLK) encoderAcumulado++;
+        else encoderAcumulado--;
+    }
+    ultimoEstadoCLK = sCLK;
+}
+
+// --- FUNÇÕES DE APOIO ---
+
+void reconnectMQTT() {
+    while (!mqttClient.connected()) {
+        Serial.print("Tentando MQTT...");
+        String clientId = "ESP32-Homog-" + String(random(0xffff), HEX);
+        if (mqttClient.connect(clientId.c_str())) {
+            Serial.println("Conectado!");
+        } else {
+            Serial.print("Erro rc="); Serial.print(mqttClient.state());
+            Serial.println(" Retentando em 5s...");
+            delay(5000);
+        }
+    }
+}
+
+void atualizarTelaOLED() {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x12_tf);
+    u8g2.drawStr(0, 12, "SISTEMA HIBRIDO TCC");
+    u8g2.drawHLine(0, 15, 128);
+
+    u8g2.setFont(u8g2_font_helvB14_tf);
+    u8g2.setCursor(0, 45);
+    u8g2.print("TEMP: "); u8g2.print(temperatura, 1); u8g2.print(" C");
+
+    u8g2.setCursor(0, 80);
+    u8g2.print("RPM: "); u8g2.print(rpmReal);
+
+    // Barra de progresso do PWM
+    u8g2.drawFrame(0, 110, 120, 10);
+    int barWidth = map(valor_pwm, 0, 255, 0, 118);
+    u8g2.drawBox(1, 111, barWidth, 8);
+    u8g2.sendBuffer();
+}
+
+// --- CALLBACKS BLYNK ---
+
+BLYNK_WRITE(V1) { // Slider de Velocidade
+    int val = param.asInt();
+    if (!travaEmergencia) {
+        valor_pwm = val;
+        precisaAtualizarOLED = true;
+    }
+}
+
+BLYNK_WRITE(V3) { // Botão de Emergência
+    travaEmergencia = (param.asInt() == 1);
+    if (travaEmergencia) {
+        valor_pwm = 0;
+        precisaAtualizarOLED = true;
+        ledcWrite(PWM_CHANNEL, 0); 
+        Blynk.logEvent("emergencia", "MOTOR PARADO VIA APP!");
+    }
+}
+
+// --- SETUP ---
+
+void setup() {
+    Serial.begin(115200);
+    
+    // Configuração PWM
+    ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RES);
+    ledcAttachPin(MOTOR_PIN, PWM_CHANNEL);
+
+    // Configuração Encoder
+    pinMode(ENC_CLK, INPUT_PULLUP);
+    pinMode(ENC_DT, INPUT_PULLUP);
+    ultimoEstadoCLK = digitalRead(ENC_CLK);
+    attachInterrupt(digitalPinToInterrupt(ENC_CLK), tratarEncoder, CHANGE);
+
+    // Configuração Telemetria (Fio Amarelo)
+    pinMode(FG_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(FG_PIN), contarFG, FALLING);
+
+    // Inicialização OLED e WiFi/Blynk
+    u8g2.begin();
+    mqttClient.setServer(mqtt_server, 1883);
+    Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+    
+    atualizarTelaOLED();
+}
+
+// --- LOOP PRINCIPAL ---
+
+void loop() {
+    Blynk.run();
+    if (!mqttClient.connected()) reconnectMQTT();
+    mqttClient.loop();
+
+    // Filtro de Emergência
+    if (travaEmergencia) {
+        valor_pwm = 0;
+        encoderAcumulado = 0;
+    }
+
+    // Processamento do Encoder Físico
+    if (encoderAcumulado != 0 && !travaEmergencia) {
+        noInterrupts();
+        int passos = encoderAcumulado;
+        encoderAcumulado = 0;
+        interrupts();
+
+        valor_pwm += (abs(passos) > 1) ? (passos * 10) : (passos * 2);
+        valor_pwm = constrain(valor_pwm, 0, 255);
+        precisaAtualizarOLED = true;
+    }
+
+    // Escrita no Motor (Lógica Direta via Optoacoplador)
+    ledcWrite(PWM_CHANNEL, valor_pwm);
+
+    if (precisaAtualizarOLED) {
+        atualizarTelaOLED();
+        precisaAtualizarOLED = false;
+    }
+
+    unsigned long tempoAtual = millis();
+
+    // Sincronização Periódica (1 segundo)
+    if (tempoAtual - tempoAnteriorSinc >= 1000) {
+        tempoAnteriorSinc = tempoAtual;
+
+        // 1. Cálculo do RPM Real (Fio Amarelo)
+        noInterrupts();
+        unsigned long pulsos = contadorPulsosFG;
+        contadorPulsosFG = 0;
+        interrupts();
+        // Fórmula: (Pulsos no segundo * 60) / 6 pulsos por volta
+        rpmReal = (pulsos * 60) / 6;
+
+        // 2. Simulação de Temperatura
+        if (valor_pwm > 0) {
+            if (temperatura < 38.0) temperatura += 0.5;
+            else if (temperatura < 40.0) temperatura += 0.1;
+            else temperatura += (random(-20, 20) / 100.0);
+        } else {
+            if (temperatura > 25.0) temperatura -= 0.1;
+        }
+
+        // 3. Envio para Blynk
+        Blynk.virtualWrite(V0, temperatura);
+        Blynk.virtualWrite(V1, valor_pwm);
+        Blynk.virtualWrite(V2, rpmReal);
+
+        // 4. Envio para MQTT
+        StaticJsonDocument<128> mqttDoc;
+        mqttDoc["temp"] = (float)((int)(temperatura * 10)) / 10.0;
+        mqttDoc["rpm"] = rpmReal;
+        mqttDoc["status"] = travaEmergencia ? "EMERGENCIA" : "OK";
+        
+        char buffer[128];
+        serializeJson(mqttDoc, buffer);
+        mqttClient.publish("ifsudestemg/homogeneizador/dados", buffer);
+    }
+
+    // Debug Serial (500ms)
+    if (tempoAtual - tempoAnteriorSerial >= 500) {
+        tempoAnteriorSerial = tempoAtual;
+        Serial.print("> TEMP: "); Serial.print(temperatura, 1);
+        Serial.print("C | RPM REAL: "); Serial.print(rpmReal);
+        Serial.print(" | PWM: "); Serial.println(valor_pwm);
+    }
+}
