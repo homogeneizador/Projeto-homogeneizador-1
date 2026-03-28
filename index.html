@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Homogeneizador - MQTT</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js" type="text/javascript"></script>
+    <style>
+        body { font-family: sans-serif; background: #f4f4f9; display: flex; justify-content: center; padding: 20px; }
+        .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 300px; text-align: center; }
+        .data-val { font-size: 2.5rem; font-weight: bold; color: #2c3e50; margin: 10px 0; }
+        .unit { font-size: 1rem; color: #7f8c8d; }
+        .status { font-size: 0.8rem; margin-top: 20px; color: #27ae60; }
+        .emergency { color: #e74c3c; font-weight: bold; display: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Homogeneizador</h2>
+        <hr>
+        <div>
+            <p>Temperatura</p>
+            <div id="temp" class="data-val">--</div>
+            <span class="unit">°Celsius</span>
+        </div>
+        <br>
+        <div>
+            <p>Rotação Real</p>
+            <div id="rpm" class="data-val">--</div>
+            <span class="unit">RPM</span>
+        </div>
+        <div id="status" class="status">Conectando ao Broker...</div>
+        <div id="alarm" class="emergency">EMERGÊNCIA ATIVADA</div>
+    </div>
+
+    <script>
+        // Configurações do Mosquitto para Web (Porta 8081 com SSL)
+        const client = new Paho.MQTT.Client("test.mosquitto.org", 8081, "web_client_" + Math.random().toString(16).substr(2, 8));
+
+        client.onConnectionLost = (obj) => { document.getElementById('status').innerHTML = "Conexão Perdida!"; };
+
+        client.onMessageArrived = (msg) => {
+            const data = JSON.parse(msg.payloadString);
+            document.getElementById('temp').innerHTML = data.temp.toFixed(1);
+            document.getElementById('rpm').innerHTML = data.rpm;
+            
+            // Lógica de Alarme
+            if(data.status === "EMERGENCIA" || data.trava === 1) {
+                document.getElementById('alarm').style.display = 'block';
+            } else {
+                document.getElementById('alarm').style.display = 'none';
+            }
+        };
+
+        client.connect({
+            onSuccess: () => {
+                document.getElementById('status').innerHTML = "Conectado ao Mosquitto";
+                client.subscribe("ifsudestemg/homogeneizador/dados");
+            },
+            useSSL: true
+        });
+    </script>
+</body>
+</html>
