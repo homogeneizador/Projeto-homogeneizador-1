@@ -1,7 +1,6 @@
-// Substitua pelos seus dados do console do Blynk
-#define BLYNK_TEMPLATE_ID   "SEU_ID_AQUI"
-#define BLYNK_TEMPLATE_NAME "NOME_DO_TEMPLATE"
-#define BLYNK_AUTH_TOKEN    "SEU_TOKEN_AQUI"
+#define BLYNK_TEMPLATE_ID   "TMPL2S15vGwG_"
+#define BLYNK_TEMPLATE_NAME "Homogeneizador"
+#define BLYNK_AUTH_TOKEN    "PeyZusk1HQHYqSeYs6N8wAs8A4EhifPl"
 
 #include <Arduino.h>
 #include <U8g2lib.h>
@@ -19,8 +18,8 @@ PubSubClient mqttClient(espClient);
 unsigned long ultimoEnvioMQTT = 0;
 
 // --- CONFIGURAÇÕES WIFI ---
-char ssid[] = "SEU_ID_AQUI";
-char pass[] = "SUA_SENHA_AQUI";
+char ssid[] = "tp_link_5200_2_4";
+char pass[] = "9ENAE674DVSG672HJBS3";
 
 // --- HARDWARE ---
 #define MOTOR_PIN 25
@@ -30,6 +29,8 @@ char pass[] = "SUA_SENHA_AQUI";
 #define PWM_CHANNEL 0
 #define PWM_FREQ    5000
 #define PWM_RES     8
+#define FG_PIN 18
+
 
 U8G2_SH1107_PIMORONI_128X128_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
@@ -112,30 +113,50 @@ void atualizarTelaOLED() {
     u8g2.sendBuffer();
 }
 
+volatile unsigned long contadorPulsosFG = 0;
+
+void IRAM_ATTR contarFG() {
+    contadorPulsosFG++;
+}
+
 void setup() {
     Serial.begin(115200);
-    // Configura o MQTT
+    
+    // 1. Inicializa o OLED primeiro (Fundamental!)
+    u8g2.begin();
+    u8g2.setBusClock(400000);
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x12_tf);
+    u8g2.drawStr(0, 50, "Iniciando Sistema..."); // Texto neutro
+    u8g2.sendBuffer();
+
+    // 2. Configura o MQTT
     mqttClient.setServer(mqtt_server, 1883);
     
-    // PWM
+    // 3. Configura o PWM (Lógica Inversa: Motor começa parado)
     ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RES);
     ledcAttachPin(MOTOR_PIN, PWM_CHANNEL);
-
-    // Encoder
+    ledcWrite(PWM_CHANNEL, 0); // Garante que o motor comece PARADO 
+    
+    // 4. Configura o Encoder
     pinMode(ENC_CLK, INPUT_PULLUP);
     pinMode(ENC_DT, INPUT_PULLUP);
     ultimoEstadoCLK = digitalRead(ENC_CLK);
     attachInterrupt(digitalPinToInterrupt(ENC_CLK), tratarEncoder, CHANGE);
 
-    // OLED
-    u8g2.begin();
-    u8g2.setBusClock(400000);
+    // 5. Configura o Fio Amarelo (FG)
+    pinMode(FG_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(FG_PIN), contarFG, FALLING);
+
+    // 6. Configura WiFi e Blynk de forma inteligente (TIMEOUT)
+    Serial.println("Tentando conectar WiFi...");
+    // Tenta conectar por 10 segundos. Se falhar, segue para o loop()
+    WiFi.begin(ssid, pass);
+    Blynk.config(BLYNK_AUTH_TOKEN); 
     
-    // Inicia Blynk (Conecta WiFi)
-    Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
-    
+    // 7. Finaliza o setup e desenha a tela principal
     atualizarTelaOLED();
-    
+    Serial.println("Sistema Pronto!");
 }
 
 void reconnectMQTT() {
@@ -190,8 +211,8 @@ void loop() {
 
     // 4. SAÍDA PARA O MOTOR (Hardware)
     // Aplica a lógica invertida (255 - valor_pwm), se utilizar o optoacoplador, utilize o valor_pwm
-    int sinal_invertido = 255 - valor_pwm;
-    ledcWrite(PWM_CHANNEL, valor_pwm);
+    // int sinal_invertido = 255 - valor_pwm;
+    ledcWrite(PWM_CHANNEL, valor_pwm); // Envia o sinal PWM para o motor (lógica direta, pois o hardware é invertido)
 
     // 5. INTERFACE E SENSORES (OLED e Telemetria)
     if (precisaAtualizarOLED) {
