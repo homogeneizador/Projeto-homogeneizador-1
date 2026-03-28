@@ -1,5 +1,36 @@
 # Projeto-homogeneizador-1
 
+# 🌀 Homogeneizador de Amostras - Módulo de Controle
+
+> **⚠️ ATENÇÃO: CONFIGURAÇÃO INICIAL OBRIGATÓRIA**
+> 
+> Antes de realizar o upload do código para o ESP32, você **deve** atualizar as credenciais de rede no arquivo principal (`.ino` ou `.cpp`). Sem isso, o sistema não acessará o Blynk nem o Dashboard MQTT.
+>
+> Procure pelas seguintes linhas no início do código:
+> ```cpp
+> char ssid[] = "NOME_DA_SUA_REDE"; // Substitua pelo nome do Wi-Fi
+> char pass[] = "SENHA_DA_REDE";     // Substitua pela senha do Wi-Fi
+> ```
+
+## 🌐 Monitoramento Web (Live Dashboard)
+
+O projeto conta com um dashboard estático hospedado via **GitHub Pages**, que permite o acompanhamento em tempo real sem a necessidade de instalação de softwares adicionais.
+
+* **URL do Dashboard:** https://homogeneizador.github.io/Projeto-homogeneizador-1/
+* **Broker:** `test.mosquitto.org` (WebSockets)
+* **Tópico:** `ifsudestemg/homogeneizador/dados`
+---
+
+## 📌 Visão Geral do Projeto
+Este projeto faz parte do desenvolvimento de um **Homogeneizador de Leite Materno** para UTIs Neonatais. Minha responsabilidade consiste no **Módulo de Controle e Telemetria**, integrando hardware de precisão com monitoramento via IoT.
+
+### Principais Funcionalidades:
+* **Controle Híbrido:** Ajuste de velocidade via Encoder Físico ou App Blynk.
+* **Telemetria de Precisão:** Leitura do RPM Real do motor via Fio Amarelo (FG).
+* **Segurança Ativa:** Isolamento galvânico total e botão de emergência com prioridade de interrupção.
+* **Multicloud:** Envio simultâneo de dados para Blynk e Broker MQTT (Mosquitto).
+
+
 ## 🛠️ Hardware: Guia de Conexão e Pinagem
 
 Este projeto utiliza um **ESP32 DevKit V1** como unidade de processamento central. A arquitetura foi desenhada priorizando a **isolação galvânica** entre o circuito de controle (3.3V) e o circuito de potência (12V) para garantir a integridade do microcontrolador.
