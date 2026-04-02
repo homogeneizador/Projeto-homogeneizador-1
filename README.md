@@ -22,7 +22,7 @@ O projeto conta com um dashboard estático hospedado via **GitHub Pages**, que p
 ---
 
 ## 📌 Visão Geral do Projeto
-Este projeto faz parte do desenvolvimento de um **Homogeneizador de Leite Materno** para UTIs Neonatais. Minha responsabilidade consiste no **Módulo de Controle e Telemetria**, integrando hardware de precisão com monitoramento via IoT.
+Este projeto faz parte do desenvolvimento de um **Homogeneizador de Leite Materno** para UTIs Neonatais, integrando hardware de precisão com monitoramento via IoT.
 
 ### Principais Funcionalidades:
 * **Controle Híbrido:** Ajuste de velocidade via Encoder Físico ou App Blynk.
