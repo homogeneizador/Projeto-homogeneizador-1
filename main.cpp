@@ -1,6 +1,6 @@
-#define BLYNK_TEMPLATE_ID   "TMPL2S15vGwG_"
-#define BLYNK_TEMPLATE_NAME "Homogeneizador"
-#define BLYNK_AUTH_TOKEN    "PeyZusk1HQHYqSeYs6N8wAs8A4EhifPl"
+#define BLYNK_TEMPLATE_ID   "T"
+#define BLYNK_TEMPLATE_NAME "H"
+#define BLYNK_AUTH_TOKEN    "P"
 
 #include <Arduino.h>
 #include <U8g2lib.h>
@@ -18,8 +18,8 @@ PubSubClient mqttClient(espClient);
 unsigned long ultimoEnvioMQTT = 0;
 
 // --- CONFIGURAÇÕES WIFI ---
-char ssid[] = "tp_link_5200_2_4";
-char pass[] = "9ENAE674DVSG672HJBS3";
+char ssid[] = "" // Substitua pelo nome da sua rede WiFi
+char pass[] = "" // Substitua pela senha da sua rede WiFi
 
 // --- HARDWARE ---
 #define MOTOR_PIN 25
@@ -27,7 +27,7 @@ char pass[] = "9ENAE674DVSG672HJBS3";
 #define ENC_DT    27
 #define ENC_SW    14
 #define PWM_CHANNEL 0
-#define PWM_FREQ    5000
+#define PWM_FREQ    1000
 #define PWM_RES     8
 #define FG_PIN 18
 
@@ -37,13 +37,14 @@ U8G2_SH1107_PIMORONI_128X128_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 // --- VARIÁVEIS ---
 volatile int valor_pwm = 0;   
 float temperatura = 25.0;     
-int rpm = 0;
+int rpm_real = 0;
 unsigned long tempoAnteriorSerial = 0;
 unsigned long tempoAnteriorBlynk = 0;
 volatile unsigned long ultimoDebounce = 0;
 volatile int ultimoEstadoCLK;
 volatile bool precisaAtualizarOLED = false;
 volatile bool travaEmergencia = false; // Variável de trava de emergência
+
 
 // SINCRONIZAÇÃO BLYNK (APP -> ESP32)
 
@@ -134,6 +135,7 @@ void setup() {
     mqttClient.setServer(mqtt_server, 1883);
     
     // 3. Configura o PWM (Lógica Inversa: Motor começa parado)
+
     ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RES);
     ledcAttachPin(MOTOR_PIN, PWM_CHANNEL);
     ledcWrite(PWM_CHANNEL, 0); // Garante que o motor comece PARADO 
@@ -178,15 +180,13 @@ void reconnectMQTT() {
 }
 
 void loop() {
-    // 1. ATUALIZAÇÃO DE REDE (Prioridade Máxima)
-    // Recebe o comando do botão de emergência do servidor
+    // 1. ATUALIZAÇÃO DE REDE
     Blynk.run(); 
 
-    // 2. FILTRO DE SEGURANÇA (Trava de Emergência)
-    // Se a trava estiver ativa, forçamos o PWM a zero antes de qualquer cálculo
+    // 2. FILTRO DE SEGURANÇA
     if (travaEmergencia) {
         valor_pwm = 0;
-        encoderAcumulado = 0; // Descarta giros acidentais no KY-040 físico
+        encoderAcumulado = 0; 
     }
     if (!mqttClient.connected()) {
         reconnectMQTT();
@@ -194,86 +194,89 @@ void loop() {
     mqttClient.loop();
 
     // 3. PROCESSAMENTO DO ENCODER 
-    // Só entra aqui se a emergência NÃO estiver travada
     if (encoderAcumulado != 0 && !travaEmergencia) {
         noInterrupts();
         int passos = encoderAcumulado;
         encoderAcumulado = 0;
         interrupts();
 
-        // Lógica de aceleração que já validamos
-        if (abs(passos) > 1) valor_pwm += (passos * 10);
-        else valor_pwm += (passos * 2);
+        //if (abs(passos) > 1) valor_pwm += (passos * 10);
+        //else valor_pwm += (passos * 2);
+        valor_pwm += (passos * 5); // Ajuste a sensibilidade aqui (5 é um bom ponto de partida)
 
         valor_pwm = constrain(valor_pwm, 0, 255);
         precisaAtualizarOLED = true;
     }
 
-    // 4. SAÍDA PARA O MOTOR (Hardware)
-    // Aplica a lógica invertida (255 - valor_pwm), se utilizar o optoacoplador, utilize o valor_pwm
-    // int sinal_invertido = 255 - valor_pwm;
-    ledcWrite(PWM_CHANNEL, valor_pwm); // Envia o sinal PWM para o motor (lógica direta, pois o hardware é invertido)
+    // 4. SAÍDA PARA O MOTOR
+    if (valor_pwm == 0 || travaEmergencia) {
+        ledcWrite(PWM_CHANNEL, 0); // Garante desligado
+    } else {
+        // Mapeia o valor do encoder (1-255) para uma faixa que o motor entenda.
+        // Se o motor pula para o máximo muito rápido, diminua o 200 para 150.
+        int pwm_suave = map(valor_pwm, 1, 255, 10, 255); 
+        ledcWrite(PWM_CHANNEL, pwm_suave);
+    } 
 
-    // 5. INTERFACE E SENSORES (OLED e Telemetria)
+    // 5. INTERFACE (OLED) - Resposta rápida ao usuário
     if (precisaAtualizarOLED) {
         atualizarTelaOLED();
         precisaAtualizarOLED = false;
     }
+
     unsigned long tempoAtual = millis();
 
-    // Sincronização Geral (Blynk + MQTT + Temperatura) a cada 1s
+    // 6. CÁLCULO DE SENSORES E TELEMETRIA (A cada 1 segundo)
     if (tempoAtual - tempoAnteriorBlynk >= 1000) {
         tempoAnteriorBlynk = tempoAtual;
         
+        // --- CÁLCULO DO RPM REAL (FG SIGNAL) ---
+        noInterrupts();
+        unsigned long pulsos = contadorPulsosFG;
+        contadorPulsosFG = 0; // Reseta para o próximo segundo
+        interrupts();
+
+        // Cálculo para o B2418 (ajuste o divisor se necessário)
+        int rpm_real = (pulsos * 60) / 6; 
+        if (valor_pwm == 0) rpm_real = 0; // Limpa ruído parado
+
         // --- LÓGICA DE TEMPERATURA ---
         if (valor_pwm > 0) {
             if (temperatura < 38.0) temperatura += 0.5;
             else if (temperatura < 40.0) temperatura += 0.1;
-            else {
-                float oscilacao = (random(-20, 20) / 100.0); 
-                temperatura = 40.0 + oscilacao;
-            }
         } else {
             if (temperatura > 25.0) temperatura -= 0.1;
         }
 
+        // Força atualização do OLED para mostrar o RPM real
+        precisaAtualizarOLED = true;
+
         // --- ATUALIZAÇÃO BLYNK ---
         Blynk.virtualWrite(V0, temperatura); 
         Blynk.virtualWrite(V1, valor_pwm);
-        Blynk.virtualWrite(V2, map(valor_pwm, 0, 255, 0, 6400));
+        Blynk.virtualWrite(V2, rpm_real); // Enviando o valor lido do sensor
 
         // --- PUBLICAÇÃO MQTT ---
         if (mqttClient.connected()) {
             StaticJsonDocument<128> mqttDoc;
             mqttDoc["temp"] = (float)((int)(temperatura * 10)) / 10.0;
-            mqttDoc["rpm"] = map(valor_pwm, 0, 255, 0, 6400);
+            mqttDoc["rpm"] = rpm_real;
+            mqttDoc["pwm"] = valor_pwm;
             mqttDoc["trava"] = travaEmergencia ? 1 : 0;
             
             char buffer[128];
             serializeJson(mqttDoc, buffer);
-            mqttClient.publish("ifsudestemg/homogeneizador/dados", buffer);
+            mqttClient.publish("alguma_coisa", buffer);  //mudar para o nome desejável
         }
     }
 
-    // 6. MONITOR SERIAL (VS CODE) - A cada 500ms
+    // 7. MONITOR SERIAL (A cada 500ms)
     if (tempoAtual - tempoAnteriorSerial >= 500) { 
         tempoAnteriorSerial = tempoAtual;
 
-        int rpm_atual = map(valor_pwm, 0, 255, 0, 6400);
-
-        // Mensagem Amigável para o Humano ler
+        // Note que aqui removemos o map(6400) e usamos a lógica do sensor
         Serial.print("> STATUS: ");
-        Serial.print(temperatura, 1); Serial.print("C | ");
-        Serial.print(rpm_atual); Serial.print(" RPM | ");
-        Serial.print("PWM: "); Serial.println(valor_pwm);
-
-        // JSON para o Computador/Python ler (Opcional)
-        StaticJsonDocument<128> doc;
-        doc["temp"] = (float)((int)(temperatura * 10)) / 10.0;
-        doc["rpm"] = rpm_atual;
-        doc["pwm"] = valor_pwm;
-        serializeJson(doc, Serial);
-        Serial.println(); // Pula linha para o próximo pacote
+        Serial.print(temperatura, 1); Serial.print("C | PWM: "); 
+        Serial.print(valor_pwm); Serial.println();
     }
-
 }
