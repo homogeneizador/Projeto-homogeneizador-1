@@ -1,6 +1,6 @@
-#define BLYNK_TEMPLATE_ID   "T"
-#define BLYNK_TEMPLATE_NAME "H"
-#define BLYNK_AUTH_TOKEN    "P"
+#define BLYNK_TEMPLATE_ID   ""
+#define BLYNK_TEMPLATE_NAME ""
+#define BLYNK_AUTH_TOKEN    ""
 
 #include <Arduino.h>
 #include <U8g2lib.h>
@@ -18,8 +18,8 @@ PubSubClient mqttClient(espClient);
 unsigned long ultimoEnvioMQTT = 0;
 
 // --- CONFIGURAÇÕES WIFI ---
-char ssid[] = "" // Substitua pelo nome da sua rede WiFi
-char pass[] = "" // Substitua pela senha da sua rede WiFi
+char ssid[] = "" ; //"" // Substitua pelo nome da sua rede WiFi
+char pass[] = "" ; //"" // Substitua pela senha da sua rede WiFi
 
 // --- HARDWARE ---
 #define MOTOR_PIN 25
@@ -44,7 +44,12 @@ volatile unsigned long ultimoDebounce = 0;
 volatile int ultimoEstadoCLK;
 volatile bool precisaAtualizarOLED = false;
 volatile bool travaEmergencia = false; // Variável de trava de emergência
-
+bool cronometroRodando = false;
+unsigned long segundosTranscorridos = 0;
+unsigned long milisAnteriorCronometro = 0;
+int ultimoPWMEnviado = -1; // Para evitar envios redundantes ao Blynk
+int ultimoRPMEnviado = -1; // Para evitar envios redundantes ao Blynk
+unsigned long ultimoTempoEnviado = 0; // Para evitar envios redundantes ao Blynk
 
 // SINCRONIZAÇÃO BLYNK (APP -> ESP32)
 
@@ -56,21 +61,37 @@ BLYNK_WRITE(V1) {
     }
 }
 
-// BOTÃO DE EMERGÊNCIA (V3)
 BLYNK_WRITE(V3) {
-    travaEmergencia = (param.asInt() == 1);
-    if (travaEmergencia == 1) {
-        valor_pwm = 0; // Para o motor imediatamente
-        precisaAtualizarOLED = true;
-
-        //Força o desligamento imediato no pino (lógica invertida do motor)
-        ledcWrite(PWM_CHANNEL, 255); // Sinal máximo para desligar o motor
-
-        Serial.println("EMERGENCIA ATIVADA: MOTOR PARADO!!!!");
-
-        // Opcional: Envia uma notificação para o app
-        Blynk.logEvent("emergencia_ativada", "Motor parado por emergência!");
+    bool estadoBotao = (param.asInt() == 1);
+    if (estadoBotao) {
+        travaEmergencia = true;
+        valor_pwm = 0;
+        ledcWrite(PWM_CHANNEL, 0); // 0 é parado no seu motor
+        Serial.println("!!! EMERGÊNCIA ATIVA !!!");
+    } else {
+        travaEmergencia = false;
+        ledcWrite(PWM_CHANNEL, 0); // Mantém parado ao destravar por segurança
+        Serial.println("Sistema liberado.");
     }
+    precisaAtualizarOLED = true;
+}
+
+// BOTÃO START/STOP NO BLYNK (V4)
+BLYNK_WRITE(V4) {
+    int estadoBotaoApp = param.asInt(); 
+    
+    // O Blynk manda 1 quando você liga o switch no app
+    if (estadoBotaoApp == 1) {
+        cronometroRodando = true;
+        segundosTranscorridos = 0; // Zera ao iniciar
+        Serial.println("Cronometro: LIGADO pelo App");
+    } else {
+        cronometroRodando = false;
+        segundosTranscorridos = 0; // Zera ao parar (conforme sua lógica)
+        Serial.println("Cronometro: DESLIGADO pelo App");
+    }
+    
+    precisaAtualizarOLED = true;
 }
 
 // INTERRUPÇÃO DO ENCODER (MAIS LEVE)
@@ -97,12 +118,19 @@ void IRAM_ATTR tratarEncoder() {
 void atualizarTelaOLED() {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x12_tf);
-    u8g2.drawStr(0, 12, "MODO HIBRIDO (IOT)");
+    u8g2.drawStr(0, 12, "HOMOGENEIZADOR");
     u8g2.drawHLine(0, 15, 128);
 
     u8g2.setFont(u8g2_font_helvB14_tf);
     u8g2.setCursor(0, 45);
-    u8g2.print("TEMP: "); u8g2.print(temperatura, 1); u8g2.print(" C");
+    
+    int minutos = segundosTranscorridos / 60;
+    int segundos = segundosTranscorridos % 60;
+
+    u8g2.print("Tempo: ");
+    if (minutos < 10) u8g2.print("0"); u8g2.print(minutos); 
+    u8g2.print(":");
+    if (segundos < 10) u8g2.print("0"); u8g2.print(segundos);
 
     u8g2.setCursor(0, 80);
     int rpm_preview = map(valor_pwm, 0, 255, 0, 6400);
@@ -143,6 +171,7 @@ void setup() {
     // 4. Configura o Encoder
     pinMode(ENC_CLK, INPUT_PULLUP);
     pinMode(ENC_DT, INPUT_PULLUP);
+    pinMode(ENC_SW, INPUT_PULLUP);
     ultimoEstadoCLK = digitalRead(ENC_CLK);
     attachInterrupt(digitalPinToInterrupt(ENC_CLK), tratarEncoder, CHANGE);
 
@@ -162,26 +191,61 @@ void setup() {
 }
 
 void reconnectMQTT() {
-    while (!mqttClient.connected()) {
+    // Tenta conectar apenas se o Wi-Fi estiver ok e não estiver conectado ao MQTT
+    if (WiFi.status() == WL_CONNECTED && !mqttClient.connected()) {
         Serial.print("Tentando conexão MQTT...");
-        // Cria um ID de cliente único usando o MAC do ESP32
-        String clientId = "ESP32-Homog-";
-        clientId += String(random(0xffff), HEX);
+        String clientId = "ESP32-Homog-" + String(random(0xffff), HEX);
         
         if (mqttClient.connect(clientId.c_str())) {
-            Serial.println("conectado ao MQTT!");
+            Serial.println("conectado!");
         } else {
-            Serial.print("falha, rc=");
-            Serial.print(mqttClient.state());
-            Serial.println(" tentando novamente em 5s");
-            delay(5000);
+            Serial.println("falhou, tentando no próximo ciclo.");
         }
     }
 }
 
+void gerenciarBotaoCronometro() {
+    static bool ultimoEstadoBotao = HIGH;
+    bool estadoAtualBotao = digitalRead(ENC_SW);
+
+    if (ultimoEstadoBotao == HIGH && estadoAtualBotao == LOW) {
+        delay(50); // Debounce
+        
+        cronometroRodando = !cronometroRodando; // Inverte o estado
+        
+        if (cronometroRodando) {
+            segundosTranscorridos = 0;
+        } else {
+            segundosTranscorridos = 0;
+        }
+
+        // --- O PULO DO GATO ---
+        // Envia o novo estado para o V4 no Blynk para o botão mudar de cor/texto
+        Blynk.virtualWrite(V4, cronometroRodando ? 1 : 0);
+        
+        precisaAtualizarOLED = true;
+        Serial.print("Cronometro via Encoder: ");
+        Serial.println(cronometroRodando ? "ON" : "OFF");
+    }
+    ultimoEstadoBotao = estadoAtualBotao;
+}
+
 void loop() {
     // 1. ATUALIZAÇÃO DE REDE
-    Blynk.run(); 
+    if (WiFi.status() == WL_CONNECTED) {
+        Blynk.run();
+        mqttClient.loop();
+    }
+    // Tentativa de reconexão sem travar o motor
+    static unsigned long ultimaTentativaReconexao = 0;
+    if (WiFi.status() == WL_CONNECTED && !mqttClient.connected()) {
+        if (millis() - ultimaTentativaReconexao > 5000) { // Tenta reconectar a cada 5 segundos
+            reconnectMQTT();
+            ultimaTentativaReconexao = millis();
+        }
+    }
+
+    gerenciarBotaoCronometro(); // Verifica o estado do botão a cada loop
 
     // 2. FILTRO DE SEGURANÇA
     if (travaEmergencia) {
@@ -209,14 +273,13 @@ void loop() {
     }
 
     // 4. SAÍDA PARA O MOTOR
-    if (valor_pwm == 0 || travaEmergencia) {
-        ledcWrite(PWM_CHANNEL, 0); // Garante desligado
+    if (travaEmergencia || valor_pwm == 0) {
+        ledcWrite(PWM_CHANNEL, 0); 
     } else {
-        // Mapeia o valor do encoder (1-255) para uma faixa que o motor entenda.
-        // Se o motor pula para o máximo muito rápido, diminua o 200 para 150.
-        int pwm_suave = map(valor_pwm, 1, 255, 10, 255); 
-        ledcWrite(PWM_CHANNEL, pwm_suave);
-    } 
+        // Mapeia 1-255 do encoder para 10-255 do PWM (evita zumbido em baixa)
+        int pwm_direto = map(valor_pwm, 1, 255, 10, 255); 
+        ledcWrite(PWM_CHANNEL, pwm_direto);
+    }
 
     // 5. INTERFACE (OLED) - Resposta rápida ao usuário
     if (precisaAtualizarOLED) {
@@ -226,47 +289,63 @@ void loop() {
 
     unsigned long tempoAtual = millis();
 
-    // 6. CÁLCULO DE SENSORES E TELEMETRIA (A cada 1 segundo)
-    if (tempoAtual - tempoAnteriorBlynk >= 1000) {
+    // 6. CÁLCULO DE SENSORES E TELEMETRIA
+    if (tempoAtual - tempoAnteriorBlynk >= 1000) { // Ciclo base de 1 segundo
         tempoAnteriorBlynk = tempoAtual;
-        
-        // --- CÁLCULO DO RPM REAL (FG SIGNAL) ---
-        noInterrupts();
-        unsigned long pulsos = contadorPulsosFG;
-        contadorPulsosFG = 0; // Reseta para o próximo segundo
-        interrupts();
 
-        // Cálculo para o B2418 (ajuste o divisor se necessário)
-        int rpm_real = (pulsos * 60) / 6; 
-        if (valor_pwm == 0) rpm_real = 0; // Limpa ruído parado
-
-        // --- LÓGICA DE TEMPERATURA ---
-        if (valor_pwm > 0) {
-            if (temperatura < 38.0) temperatura += 0.5;
-            else if (temperatura < 40.0) temperatura += 0.1;
-        } else {
-            if (temperatura > 25.0) temperatura -= 0.1;
+        // --- LÓGICA DO CRONÔMETRO ---
+        if (cronometroRodando && valor_pwm > 0) {
+            segundosTranscorridos++;
+            precisaAtualizarOLED = true;
         }
 
-        // Força atualização do OLED para mostrar o RPM real
-        precisaAtualizarOLED = true;
-
-        // --- ATUALIZAÇÃO BLYNK ---
-        Blynk.virtualWrite(V0, temperatura); 
-        Blynk.virtualWrite(V1, valor_pwm);
-        Blynk.virtualWrite(V2, rpm_real); // Enviando o valor lido do sensor
-
-        // --- PUBLICAÇÃO MQTT ---
+        // --- CÁLCULO DO RPM ---
+        int rpm_para_envio = map(valor_pwm, 0, 255, 0, 6400);
+        
+        /*
+        // --- ENVIO PARA O BLYNK (1 SEGUNDO SEM TRAVAS) ---
+        if (WiFi.status() == WL_CONNECTED) {
+            Blynk.virtualWrite(V0, segundosTranscorridos); // Tempo segundo a segundo
+            Blynk.virtualWrite(V1, valor_pwm);             // PWM
+            Blynk.virtualWrite(V2, rpm_para_envio);        // RPM
+            
+            ultimoTempoEnviado = segundosTranscorridos;
+        }
+        */
+       
+        // --- MODO MQTT (MÁXIMA VELOCIDADE - 1 SEGUNDO) ---
         if (mqttClient.connected()) {
             StaticJsonDocument<128> mqttDoc;
-            mqttDoc["temp"] = (float)((int)(temperatura * 10)) / 10.0;
-            mqttDoc["rpm"] = rpm_real;
+            mqttDoc["tempo"] = segundosTranscorridos;
+            mqttDoc["rpm"] = rpm_para_envio;
             mqttDoc["pwm"] = valor_pwm;
-            mqttDoc["trava"] = travaEmergencia ? 1 : 0;
+            mqttDoc["status"] = travaEmergencia ? "ALERTA" : "OK";
             
             char buffer[128];
             serializeJson(mqttDoc, buffer);
-            mqttClient.publish("alguma_coisa", buffer);  //mudar para o nome desejável
+            mqttClient.publish("if", buffer);
+            mqttClient.publish("if", String(valor_pwm).c_str()); // Envia o PWM para o NEMA 17
+        }
+
+        // --- MODO BLYNK ECONÔMICO (SEM CHART) ---
+        if (WiFi.status() == WL_CONNECTED) {
+            
+            // 1. PWM e RPM: Só envia se o valor MUDAR (Economia extrema)
+            if (valor_pwm != ultimoPWMEnviado) {
+                Blynk.virtualWrite(V1, valor_pwm);
+                Blynk.virtualWrite(V2, rpm_para_envio);
+                ultimoPWMEnviado = valor_pwm;
+            }
+
+            // 2. TEMPO: Só envia a cada 5 segundos (Suficiente para leitura numérica)
+            if (cronometroRodando && segundosTranscorridos % 5 == 0) {
+                Blynk.virtualWrite(V0, segundosTranscorridos);
+            } 
+            // Garante o envio do 0 ao resetar
+            else if (segundosTranscorridos == 0 && ultimoTempoEnviado != 0) {
+                Blynk.virtualWrite(V0, 0);
+                ultimoTempoEnviado = 0;
+            }
         }
     }
 
