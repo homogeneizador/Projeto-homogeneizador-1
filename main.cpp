@@ -1,5 +1,5 @@
-#define BLYNK_TEMPLATE_ID   ""
-#define BLYNK_TEMPLATE_NAME ""
+#define BLYNK_TEMPLATE_ID   "_"
+#define BLYNK_TEMPLATE_NAME "Homogeneizador"
 #define BLYNK_AUTH_TOKEN    ""
 
 #include <Arduino.h>
@@ -18,8 +18,8 @@ PubSubClient mqttClient(espClient);
 unsigned long ultimoEnvioMQTT = 0;
 
 // --- CONFIGURAÇÕES WIFI ---
-char ssid[] = "" ; //"" // Substitua pelo nome da sua rede WiFi
-char pass[] = "" ; //"" // Substitua pela senha da sua rede WiFi
+char ssid[] = "t" ; //"" // Substitua pelo nome da sua rede WiFi
+char pass[] = "9" ; //"" // Substitua pela senha da sua rede WiFi
 
 // --- HARDWARE ---
 #define MOTOR_PIN 25
@@ -323,8 +323,8 @@ void loop() {
             
             char buffer[128];
             serializeJson(mqttDoc, buffer);
-            mqttClient.publish("if", buffer);
-            mqttClient.publish("if", String(valor_pwm).c_str()); // Envia o PWM para o NEMA 17
+            mqttClient.publish("if/homogeneizador/dados", buffer);
+            mqttClient.publish("if/homogeneizador/nema/cmd", String(valor_pwm).c_str()); // Envia o PWM para o NEMA 17
         }
 
         // --- MODO BLYNK ECONÔMICO (SEM CHART) ---
