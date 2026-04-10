@@ -1,6 +1,6 @@
-#define BLYNK_TEMPLATE_ID   "_"
+#define BLYNK_TEMPLATE_ID   "T_"
 #define BLYNK_TEMPLATE_NAME "Homogeneizador"
-#define BLYNK_AUTH_TOKEN    "l"
+#define BLYNK_AUTH_TOKEN    "P"
 
 #include <Arduino.h>
 #include <U8g2lib.h>
@@ -22,7 +22,7 @@
 #define PWM_CHANNEL 0
 
 #define PWM_CHANNEL 0
-#define PWM_FREQ    1000  // Frequência de 1kHz é ideal para o motor brushless
+#define PWM_FREQ    20000  // Frequência de 1kHz é ideal para o motor brushless
 #define PWM_RES     8     // Resolução de 8 bits (0 a 255)
 
 // PINOS DO NEMA (Ajustados para não conflitar)
@@ -38,8 +38,8 @@ AccelStepper stepper(1, NEMA_STEP, NEMA_DIR);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-char ssid[] = "t4";
-char pass[] = "3";
+char ssid[] = "t";
+char pass[] = "9";
 const char* mqtt_server = "test.mosquitto.org";
 
 // --- VARIÁVEIS VOLATILE (PARA COMPARTILHAMENTO ENTRE CORES) ---
@@ -51,10 +51,14 @@ volatile int ultimoEstadoCLK;
 volatile int ultimoEstadoCLK_Misturador;
 volatile int ultimoEstadoCLK_Nema;
 
-// --- VARIÁVEIS DE TELEMETRIA E CRONÔMETRO (MANTIDAS 100%) ---
+// --- VARIÁVEIS DE TELEMETRIA E TIMER (ATUALIZADA) ---
 float temperatura = 25.0;
-bool cronometroRodando = false;
-unsigned long segundosTranscorridos = 0;
+bool cronometroRodando = false; 
+
+// Mudamos para 'long' para evitar erros matemáticos na contagem regressiva
+// Iniciamos com 600 segundos (10 minutos) como você pediu
+volatile long tempoRestanteSegundos = 600; 
+
 unsigned long tempoAnteriorSerial = 0;
 unsigned long tempoAnteriorBlynk = 0;
 int ultimoPWMEnviado = -1;
@@ -65,7 +69,7 @@ volatile unsigned long contadorPulsosFG = 0;
 // --- VARIÁVEIS DO PID ---
 double Setpoint, Input, Output;
 // Constantes Kp, Ki, Kd (Precisarão de ajuste fino/Tuning)
-double Kp=1, Ki=0, Kd=0; 
+double Kp=0.2, Ki=0.1, Kd=0.01; 
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 
 // ================================================================
@@ -74,48 +78,40 @@ PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 void TaskMotores(void * pvParameters) {
   for(;;) {
     if (!travaEmergencia) {
+        stepper.run(); 
+    } else {
+        stepper.stop();
+    }
+
+    // AJUSTE AQUI: O motor deve girar se o PWM for > 10. 
+    // A trava de tempo zerado agora fica no loop para desligar o motor, 
+    // mas não impede você de ligar ele de novo manualmente.
+    if (!travaEmergencia && valor_pwm >= 10) {
       
-      // --- CONTROLE DO NEMA (Independente) ---
-      stepper.run(); 
-
-      // --- CONTROLE DO MISTURADOR COM PID ---
-      if (valor_pwm > 0) {
-        // 1. Calcula o RPM Real para o PID
-        noInterrupts();
-        unsigned long pulsos = contadorPulsosFG;
-        contadorPulsosFG = 0;
-        interrupts();
-        
-        // Converte pulsos para RPM (ajustado para ciclo de 50ms)
-        // Se o seu motor tem 6 pulsos por volta:
-        Input = (pulsos * 100.0); 
-        
-        // 2. Define o Alvo (Setpoint) baseado no valor_pwm (0-255 -> 0-6000 RPM)
-        Setpoint = map(valor_pwm, 0, 255, 0, 6000); 
-
-        // 3. Executa o cálculo PID
-        myPID.Compute();
-
-        // Se o motor for de lógica invertida, use: ledcWrite(PWM_CHANNEL, 255 - Output);
-        ledcWrite(PWM_CHANNEL, (int)Output);
-      } else {
-        ledcWrite(PWM_CHANNEL, 0);
-        Input = 0;
-        Setpoint = 0;
-      }
+      noInterrupts();
+      unsigned long pulsos = contadorPulsosFG;
+      contadorPulsosFG = 0;
+      interrupts();
       
+      if (pulsos > 0) {
+          Input = (pulsos * 100.0); 
+      } 
+
+      Setpoint = map(valor_pwm, 0, 255, 0, 6000); 
+      
+      myPID.SetMode(AUTOMATIC);
+      myPID.Compute();
+      
+      ledcWrite(PWM_CHANNEL, (int)Output);
+
     } else {
       ledcWrite(PWM_CHANNEL, 0);
-      stepper.stop();
+      myPID.SetMode(MANUAL); 
+      Output = 0;
+      Input = 0;
     }
     
-    // Mostra no Serial para debug
-    Serial.print("Set:"); Serial.print(Setpoint);
-    Serial.print(" In:"); Serial.print(Input);
-    Serial.print(" Out:"); Serial.println(Output);
-
-    // 100ms é o tempo ideal para o cálculo de RPM via interrupção ser estável
-    vTaskDelay(100 / portTICK_PERIOD_MS); 
+    vTaskDelay(10 / portTICK_PERIOD_MS); 
   }
 }
 
@@ -126,10 +122,15 @@ void TaskMotores(void * pvParameters) {
 
 // SINCRONIZAÇÃO BLYNK (APP -> ESP32)
 
+// --- V1: SLIDER DE VELOCIDADE (Agora recebe 0-6400) ---
 BLYNK_WRITE(V1) {
-    int valorRecebido = param.asInt();
-    if (valorRecebido != valor_pwm) {
-        valor_pwm = valorRecebido;
+    int rpmRecebido = param.asInt(); 
+    
+    // Converte o RPM (0-6400) de volta para PWM (0-255)
+    int novo_pwm = map(rpmRecebido, 0, 6400, 0, 255);
+    
+    if (novo_pwm != valor_pwm) {
+        valor_pwm = novo_pwm;
         precisaAtualizarOLED = true;
     }
 }
@@ -149,23 +150,39 @@ BLYNK_WRITE(V3) {
     precisaAtualizarOLED = true;
 }
 
-// BOTÃO START/STOP NO BLYNK (V4)
+// --- V4: START/STOP (PLAY/PAUSE) ---
 BLYNK_WRITE(V4) {
     int estadoBotaoApp = param.asInt(); 
     
-    // O Blynk manda 1 quando você liga o switch no app
     if (estadoBotaoApp == 1) {
-        cronometroRodando = true;
-        segundosTranscorridos = 0; // Zera ao iniciar
-        Serial.println("Cronometro: LIGADO pelo App");
+        // Só liga se houver tempo sobrando
+        if (tempoRestanteSegundos > 0) {
+            cronometroRodando = true;
+            Serial.println("Cronometro: RODANDO");
+        } else {
+            // Se tentar ligar com 0 segundos, desliga o botão no App automaticamente
+            cronometroRodando = false;
+            Blynk.virtualWrite(V4, 0); 
+            Serial.println("Aviso: Adicione tempo antes de iniciar!");
+        }
     } else {
         cronometroRodando = false;
-        segundosTranscorridos = 0; // Zera ao parar (conforme sua lógica)
-        Serial.println("Cronometro: DESLIGADO pelo App");
+        Serial.println("Cronometro: PAUSADO");
     }
-    
     precisaAtualizarOLED = true;
 }
+
+// --- V10: Slider de Tempo (0 a 10 min) ---
+BLYNK_WRITE(V10) {
+    tempoRestanteSegundos = param.asInt() * 60; 
+    precisaAtualizarOLED = true;
+}
+
+// --- V11, V12, V13: Botões de Soma (Mantenha assim, estão ótimos!) ---
+BLYNK_WRITE(V11) { if(param.asInt()) { tempoRestanteSegundos += 60;  precisaAtualizarOLED = true; } }
+BLYNK_WRITE(V12) { if(param.asInt()) { tempoRestanteSegundos += 300; precisaAtualizarOLED = true; } }
+BLYNK_WRITE(V13) { if(param.asInt()) { tempoRestanteSegundos += 600; precisaAtualizarOLED = true; } }
+
 
 // INTERRUPÇÃO DO ENCODER (MAIS LEVE)
 
@@ -209,20 +226,20 @@ void atualizarTelaOLED() {
     u8g2.setFont(u8g2_font_helvB14_tf);
     u8g2.setCursor(0, 45);
     
-    int minutos = segundosTranscorridos / 60;
-    int segundos = segundosTranscorridos % 60;
-
+    int m = tempoRestanteSegundos / 60;
+    int s = tempoRestanteSegundos % 60;
     u8g2.print("Tempo: ");
-    if (minutos < 10) u8g2.print("0"); u8g2.print(minutos); 
+    if (m < 10) u8g2.print("0"); u8g2.print(m);
     u8g2.print(":");
-    if (segundos < 10) u8g2.print("0"); u8g2.print(segundos);
+    if (s < 10) u8g2.print("0"); u8g2.print(s);
 
     u8g2.setCursor(0, 80);
     int rpm_preview = map(valor_pwm, 0, 255, 0, 6400);
     u8g2.print("RPM: "); u8g2.print(rpm_preview);
 
+    // Barra que se adapta ao tempo (Cheia em 10min = 600s)
     u8g2.drawFrame(0, 110, 120, 10);
-    int barWidth = map(valor_pwm, 0, 255, 0, 118);
+    int barWidth = map(constrain(tempoRestanteSegundos, 0, 600), 0, 600, 0, 118);
     u8g2.drawBox(1, 111, barWidth, 8);
     u8g2.sendBuffer();
 }
@@ -250,7 +267,7 @@ void setup() {
 
     // Configura o PID
     myPID.SetMode(AUTOMATIC);
-    myPID.SetSampleTime(50); // 10ms de intervalo
+    myPID.SetSampleTime(100); // 10ms de intervalo
     myPID.SetOutputLimits(0, 255); // Saída do PWM
 
     // Nema 17 (Z-Axis)
@@ -318,123 +335,111 @@ void gerenciarBotaoCronometro() {
     bool estadoAtualBotao = digitalRead(ENC_SW);
 
     if (ultimoEstadoBotao == HIGH && estadoAtualBotao == LOW) {
-        delay(50); // Debounce
-        
-        cronometroRodando = !cronometroRodando; // Inverte o estado
-        
-        if (cronometroRodando) {
-            segundosTranscorridos = 0;
-        } else {
-            segundosTranscorridos = 0;
+        delay(50); 
+
+        // Se o tempo acabou, ao apertar R3 ele recarrega 10 minutos E garante que o cronometro rode
+        if (tempoRestanteSegundos <= 0) {
+            tempoRestanteSegundos = 600; 
+            if (WiFi.status() == WL_CONNECTED) Blynk.virtualWrite(V10, 10); 
         }
 
-        // --- O PULO DO GATO ---
-        // Envia o novo estado para o V4 no Blynk para o botão mudar de cor/texto
-        Blynk.virtualWrite(V4, cronometroRodando ? 1 : 0);
+        cronometroRodando = !cronometroRodando; 
+        
+        if (WiFi.status() == WL_CONNECTED) {
+            Blynk.virtualWrite(V4, cronometroRodando ? 1 : 0); 
+        }
         
         precisaAtualizarOLED = true;
-        Serial.print("Cronometro via Encoder: ");
-        Serial.println(cronometroRodando ? "ON" : "OFF");
     }
     ultimoEstadoBotao = estadoAtualBotao;
 }
 
 void loop() {
-    // 1. ATUALIZAÇÃO DE REDE (Blynk e MQTT)
+    // 1. PROCESSAMENTO DE REDE (Sempre rodando)
     if (WiFi.status() == WL_CONNECTED) {
         Blynk.run();
         mqttClient.loop();
     }
-
-    // Gerencia reconexão sem travar o processamento
-    static unsigned long ultimaTentativaReconexao = 0;
-    if (WiFi.status() == WL_CONNECTED && !mqttClient.connected()) {
-        if (millis() - ultimaTentativaReconexao > 5000) {
-            reconnectMQTT();
-            ultimaTentativaReconexao = millis();
-        }
-    }
-
-    // 2. INTERFACE FÍSICA E SEGURANÇA
     gerenciarBotaoCronometro(); 
 
-    if (travaEmergencia) {
-        valor_pwm = 0;
-        encoderAcumulado = 0; 
-        // A parada física do motor acontece no Core 0 ao ler essa variável
-    }
-
-    // 3. PROCESSAMENTO DO ENCODER (Apenas lógica de valores)
+    // 2. LÓGICA DO ENCODER MISTURADOR (Local)
     if (encoderAcumulado != 0 && !travaEmergencia) {
         noInterrupts();
         int passos = encoderAcumulado;
         encoderAcumulado = 0;
         interrupts();
 
-        valor_pwm += (passos * 5); // Sensibilidade
+        valor_pwm += (passos * 5);
         valor_pwm = constrain(valor_pwm, 0, 255);
         precisaAtualizarOLED = true;
     }
 
-    // --- IMPORTANTE: Removi o ledcWrite e stepper.run daqui! ---
-    // Eles já estão sendo executados pela TaskMotores no Core 0.
-
-    // 4. ATUALIZAÇÃO DA TELA (Interface rápida)
+    // 3. ATUALIZAÇÃO DA TELA OLED
     if (precisaAtualizarOLED) {
         atualizarTelaOLED();
         precisaAtualizarOLED = false;
     }
 
+    // 4. CICLO DE 1 SEGUNDO (Telemetria e Timer)
     unsigned long tempoAtual = millis();
-
-    // 5. CÁLCULO DE SENSORES E TELEMETRIA (Ciclo de 1 segundo)
     if (tempoAtual - tempoAnteriorBlynk >= 1000) {
         tempoAnteriorBlynk = tempoAtual;
 
-        // Lógica do Cronômetro
-        if (cronometroRodando && valor_pwm > 0) {
-            segundosTranscorridos++;
+        // --- LÓGICA DO TIMER ---
+        if (cronometroRodando && tempoRestanteSegundos > 0 && valor_pwm > 0) {
+            tempoRestanteSegundos--;
             precisaAtualizarOLED = true;
+
+            if (tempoRestanteSegundos <= 0) {
+                tempoRestanteSegundos = 0;
+                valor_pwm = 0;
+                cronometroRodando = false;
+                if (WiFi.status() == WL_CONNECTED) Blynk.virtualWrite(V4, 0); 
+            }
         }
 
-        // RPM estimado para telemetria
-        int rpm_para_envio = map(valor_pwm, 0, 255, 0, 6400);
+        // --- ENVIOS PARA O BLYNK (Sincronizado e Formatado) ---
+        if (WiFi.status() == WL_CONNECTED) {
+            
+            // RPM: Só envia se mudar
+            if (valor_pwm != ultimoPWMEnviado) {
+                int rpm_para_slider = map(valor_pwm, 0, 255, 0, 6400);
+                Blynk.virtualWrite(V1, rpm_para_slider); 
+                Blynk.virtualWrite(V2, rpm_para_slider);
+                ultimoPWMEnviado = valor_pwm;
+            }
+            
+            // TEMPO: Envia String formatada (MM:SS)
+            if (tempoRestanteSegundos != ultimoTempoEnviado) {
+                int minutos = tempoRestanteSegundos / 60;
+                int segundos = tempoRestanteSegundos % 60;
+                char tempoFormatado[10];
+                sprintf(tempoFormatado, "%02d:%02d", minutos, segundos);
+
+                Blynk.virtualWrite(V0, tempoFormatado); 
+                ultimoTempoEnviado = tempoRestanteSegundos;
+            }
+        }
 
         // --- PUBLICAÇÃO MQTT ---
         if (mqttClient.connected()) {
             StaticJsonDocument<128> mqttDoc;
-            mqttDoc["tempo"] = segundosTranscorridos;
-            mqttDoc["rpm"] = rpm_para_envio;
+            mqttDoc["tempo"] = tempoRestanteSegundos;
             mqttDoc["pwm"] = valor_pwm;
-            mqttDoc["status"] = travaEmergencia ? "ALERTA" : "OK";
-            mqttDoc["z_pos"] = stepper.currentPosition(); // Adicionado para monitorar o Nema
+            mqttDoc["status"] = travaEmergencia ? "ALERTA" : (cronometroRodando ? "RODANDO" : "STOP");
+            mqttDoc["z_pos"] = stepper.currentPosition();
 
             char buffer[128];
             serializeJson(mqttDoc, buffer);
             mqttClient.publish("ifsudestemg/homogeneizador/dados", buffer);
         }
+    } // <-- Fim do bloco de 1 segundo
 
-        // --- MODO BLYNK ECONÔMICO ---
-        if (WiFi.status() == WL_CONNECTED) {
-            if (valor_pwm != ultimoPWMEnviado) {
-                Blynk.virtualWrite(V1, valor_pwm);
-                Blynk.virtualWrite(V2, rpm_para_envio);
-                ultimoPWMEnviado = valor_pwm;
-            }
-            if (cronometroRodando && segundosTranscorridos % 5 == 0) {
-                Blynk.virtualWrite(V0, segundosTranscorridos);
-            } 
-            else if (segundosTranscorridos == 0 && ultimoTempoEnviado != 0) {
-                Blynk.virtualWrite(V0, 0);
-                ultimoTempoEnviado = 0;
-            }
-        }
-    }
-
-    // 6. MONITOR SERIAL (A cada 500ms)
+    // 5. MONITOR SERIAL (500ms)
     if (tempoAtual - tempoAnteriorSerial >= 500) { 
         tempoAnteriorSerial = tempoAtual;
         Serial.print("> PWM: "); Serial.print(valor_pwm);
-        Serial.print(" | Z-POS: "); Serial.println(stepper.currentPosition());
+        Serial.print(" | Tempo: "); Serial.print(tempoRestanteSegundos);
+        Serial.print(" | Z: "); Serial.println(stepper.currentPosition());
     }
 }
