@@ -1,4 +1,4 @@
-#define BLYNK_TEMPLATE_ID   "TM"
+#define BLYNK_TEMPLATE_ID   "T"
 #define BLYNK_TEMPLATE_NAME "Homogeneizador"
 #define BLYNK_AUTH_TOKEN    "P"
 
@@ -38,8 +38,8 @@ AccelStepper stepper(1, NEMA_STEP, NEMA_DIR);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-char ssid[] = "t";
-char pass[] = "9";
+char ssid[] = ""
+char pass[] = ""
 const char* mqtt_server = "test.mosquitto.org";
 
 // --- VARIÁVEIS VOLATILE (PARA COMPARTILHAMENTO ENTRE CORES) ---
@@ -79,8 +79,8 @@ PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 // ================================================================
 void TaskMotores(void * pvParameters) {
 
-  const int PULSOS_POR_VOLTA = 2;   // Ajuste conforme seu motor
-  const int TEMPO_MEDICAO_MS = 100; // Aumentei para 100ms para leitura mais estável
+  const int PULSOS_POR_VOLTA = 2;   
+  const int TEMPO_MEDICAO_MS = 100; 
   static unsigned long ultimoTempoRPM = 0;
 
   for(;;) {
@@ -91,10 +91,10 @@ void TaskMotores(void * pvParameters) {
         stepper.stop();
     }
 
-    // 2. Controle do Misturador (Sem PID)
+    // 2. Controle do Misturador (Malha Aberta Pura)
     if (!travaEmergencia && valor_pwm >= 10) {
 
-      // --- CÁLCULO DO RPM REAL (Apenas para monitoramento) ---
+      // --- CÁLCULO DO RPM REAL ---
       unsigned long agora = millis();
       if (agora - ultimoTempoRPM >= TEMPO_MEDICAO_MS) {
         ultimoTempoRPM = agora;
@@ -108,8 +108,8 @@ void TaskMotores(void * pvParameters) {
         Input = (pulsos / tempoSeg) * (60.0 / PULSOS_POR_VOLTA);
       }
 
-      // --- SAÍDA DIRETA ---
-      // Aqui o motor obedece cegamente ao encoder
+      // --- COMANDO DIRETO (A correção está aqui) ---
+      // Em vez de usar 'Output' (que vem do PID zerado), usamos 'valor_pwm'
       ledcWrite(PWM_CHANNEL, valor_pwm); 
 
     } else {
