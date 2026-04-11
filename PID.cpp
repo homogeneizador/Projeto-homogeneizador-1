@@ -1,4 +1,4 @@
-#define BLYNK_TEMPLATE_ID   "T_"
+#define BLYNK_TEMPLATE_ID   "T"
 #define BLYNK_TEMPLATE_NAME "Homogeneizador"
 #define BLYNK_AUTH_TOKEN    "P"
 
@@ -26,7 +26,7 @@
 #define PWM_RES     8     // Resolução de 8 bits (0 a 255)
 
 // PINOS DO NEMA (Ajustados para não conflitar)
-#define NEMA_STEP 12
+#define NEMA_STEP 16
 #define NEMA_DIR  13
 #define NEMA_EN   15
 #define NEMA_ENC_CLK 32
@@ -50,6 +50,7 @@ volatile int16_t encoderAcumulado = 0;
 volatile int ultimoEstadoCLK;
 volatile int ultimoEstadoCLK_Misturador;
 volatile int ultimoEstadoCLK_Nema;
+volatile bool nemaPrecisaMover = false;
 
 // --- VARIÁVEIS DE TELEMETRIA E TIMER (ATUALIZADA) ---
 float temperatura = 25.0;
@@ -111,7 +112,7 @@ void TaskMotores(void * pvParameters) {
       Input = 0;
     }
     
-    vTaskDelay(10 / portTICK_PERIOD_MS); 
+    vTaskDelay(2 / portTICK_PERIOD_MS); 
   }
 }
 
@@ -205,13 +206,10 @@ void IRAM_ATTR tratarEncoderNema() {
     int sDT  = digitalRead(NEMA_ENC_DT);
     
     if (sCLK != ultimoEstadoCLK_Nema) {
-        // Ajuste aqui o quanto você quer que o fuso ande por "clique"
-        // 400 passos costuma ser meia volta no motor (2mm no fuso padrão)
-        if (sDT != sCLK) alvoNema += 400; 
-        else alvoNema -= 400;
+        if (sDT != sCLK) alvoNema += 100; 
+        else alvoNema -= 100;
         
-        // Apenas avisa o novo destino. O Core 0 fará o movimento.
-        stepper.moveTo(alvoNema); 
+        nemaPrecisaMover = true; // Apenas sinaliza, não move aqui!
     }
     ultimoEstadoCLK_Nema = sCLK;
 }
@@ -273,8 +271,8 @@ void setup() {
     // Nema 17 (Z-Axis)
     pinMode(NEMA_EN, OUTPUT);
     digitalWrite(NEMA_EN, LOW); // LOW ativa o driver A4988
-    stepper.setMaxSpeed(600);   // Velocidade máxima (ajuste se necessário)
-    stepper.setAcceleration(400); // Aceleração suave
+    stepper.setMaxSpeed(5000);   // Velocidade máxima (ajuste se necessário)
+    stepper.setAcceleration(4000); // Aceleração suave
 
     // 3. Configurações dos Encoders (Entradas e Interrupções)
     // Encoder 1: Misturador
@@ -373,6 +371,13 @@ void loop() {
         valor_pwm = constrain(valor_pwm, 0, 255);
         precisaAtualizarOLED = true;
     }
+
+    // LÓGICA DO ENCODER NEMA (Local)
+    if (nemaPrecisaMover) {
+        stepper.moveTo(alvoNema); 
+        nemaPrecisaMover = false; // Reseta a flag
+    }
+
 
     // 3. ATUALIZAÇÃO DA TELA OLED
     if (precisaAtualizarOLED) {
