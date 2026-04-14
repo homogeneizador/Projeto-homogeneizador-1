@@ -21,7 +21,6 @@
 #define ENC_SW  14
 #define PWM_CHANNEL 0
 
-#define PWM_CHANNEL 0
 #define PWM_FREQ    1000  // Frequência de 1kHz é ideal para o motor brushless
 #define PWM_RES     8     // Resolução de 8 bits (0 a 255)
 
@@ -38,8 +37,8 @@ AccelStepper stepper(1, NEMA_STEP, NEMA_DIR);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-char ssid[] = ""
-char pass[] = ""
+char ssid[] = "Galaxy A12";
+char pass[] = "hsmg";
 const char* mqtt_server = "test.mosquitto.org";
 
 // --- VARIÁVEIS VOLATILE (PARA COMPARTILHAMENTO ENTRE CORES) ---
@@ -71,16 +70,15 @@ volatile unsigned long contadorPulsosFG = 0;
 double Setpoint, Input, Output;
 // Constantes Kp, Ki, Kd (Precisarão de ajuste fino/Tuning)
 // No topo, mude as constantes para 0 para garantir que o PID esteja "morto"
-double Kp=0, Ki=0, Kd=0; 
+double Kp=0.2, Ki=0.5, Kd=0.0; 
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 
 // ================================================================
 // CORE 0: MOTORES (MALHA ABERTA PARA LEVANTAMENTO DE CURVA)
 // ================================================================
 void TaskMotores(void * pvParameters) {
-
-  const int PULSOS_POR_VOLTA = 2;   
-  const int TEMPO_MEDICAO_MS = 100; 
+  const int PULSOS_POR_VOLTA = 6;   
+  const int TEMPO_MEDICAO_MS = 250; 
   static unsigned long ultimoTempoRPM = 0;
 
   for(;;) {
@@ -91,11 +89,10 @@ void TaskMotores(void * pvParameters) {
         stepper.stop();
     }
 
-    // 2. Controle do Misturador (Malha Aberta Pura)
+    // 2. Controle do Misturador (Malha Fechada)
     if (!travaEmergencia && valor_pwm >= 10) {
-
-      // --- CÁLCULO DO RPM REAL ---
       unsigned long agora = millis();
+      
       if (agora - ultimoTempoRPM >= TEMPO_MEDICAO_MS) {
         ultimoTempoRPM = agora;
 
@@ -106,15 +103,25 @@ void TaskMotores(void * pvParameters) {
 
         double tempoSeg = (double)TEMPO_MEDICAO_MS / 1000.0;
         Input = (pulsos / tempoSeg) * (60.0 / PULSOS_POR_VOLTA);
-      }
+        
+        // Calcula o novo Output baseado no Input atualizado
+        double erro = abs(Setpoint - Input);
+        if (erro < 50) {
 
-      // --- COMANDO DIRETO (A correção está aqui) ---
-      // Em vez de usar 'Output' (que vem do PID zerado), usamos 'valor_pwm'
-      ledcWrite(PWM_CHANNEL, valor_pwm); 
+        } else {
+            // Erro pequeno, mantém as constantes originais
+            myPID.Compute(); 
+        }
+        
+        
+        // ATUALIZA A SAÍDA IMEDIATAMENTE APÓS O CÁLCULO
+        ledcWrite(PWM_CHANNEL, Output); 
+      }
 
     } else {
       ledcWrite(PWM_CHANNEL, 0);
       Input = 0;
+      // Dica: resetar o erro do PID aqui pode evitar trancos ao religar
     }
 
     vTaskDelay(2 / portTICK_PERIOD_MS); 
@@ -132,6 +139,7 @@ BLYNK_WRITE(V1) {
 
     if (novo_pwm != valor_pwm) {
         valor_pwm = novo_pwm;
+        Setpoint = (double)rpmRecebido;
         precisaAtualizarOLED = true;
     }
 }
@@ -235,7 +243,14 @@ void atualizarTelaOLED() {
 }
 
 void IRAM_ATTR contarFG() {
-    contadorPulsosFG++;
+    static unsigned long ultimoMicros = 0;
+    unsigned long agoraMicros = micros();
+    
+    // Ignora pulsos com intervalo menor que 500 microssegundos (filtra ruídos acima de 2kHz)
+    if (agoraMicros - ultimoMicros > 500) { 
+        contadorPulsosFG++;
+        ultimoMicros = agoraMicros;
+    }
 }
 
 void setup() {
@@ -255,7 +270,7 @@ void setup() {
 
     // PID CONFIG FIXA (NÃO MUDA MAIS NO LOOP)
     myPID.SetMode(AUTOMATIC);
-    myPID.SetSampleTime(50);      // igual janela RPM (50ms)
+    myPID.SetSampleTime(100);      // igual janela RPM (50ms)
     myPID.SetOutputLimits(0, 255);
 
     // Nema 17
@@ -350,6 +365,7 @@ void loop() {
 
         valor_pwm += (passos * 5);
         valor_pwm = constrain(valor_pwm, 0, 255);
+        Setpoint = map(valor_pwm, 0, 255, 0, 6400);
         precisaAtualizarOLED = true;
     }
 
