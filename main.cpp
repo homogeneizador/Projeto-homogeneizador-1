@@ -1,6 +1,6 @@
-#define BLYNK_TEMPLATE_ID   "_"
+#define BLYNK_TEMPLATE_ID   ""
 #define BLYNK_TEMPLATE_NAME "Homogeneizador"
-#define BLYNK_AUTH_TOKEN    "l"
+#define BLYNK_AUTH_TOKEN    ""
 
 #include <Arduino.h>
 #include <U8g2lib.h>
@@ -37,8 +37,8 @@ AccelStepper stepper(1, NEMA_STEP, NEMA_DIR);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-char ssid[] =  a;//
-char pass[] = b;//
+char ssid[] = ""; //
+char pass[] = ""; //
 const char* mqtt_server = "test.mosquitto.org";
 
 // --- VARIÁVEIS VOLATILE (PARA COMPARTILHAMENTO ENTRE CORES) ---
