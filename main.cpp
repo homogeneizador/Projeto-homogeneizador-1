@@ -21,7 +21,7 @@
 #define ENC_SW  14
 #define PWM_CHANNEL 0
 
-#define PWM_FREQ    16000  // Frequência de 1kHz é ideal para o motor brushless
+#define PWM_FREQ    20000  // Frequência de 1kHz é ideal para o motor brushless
 #define PWM_RES     8     // Resolução de 8 bits (0 a 255)
 
 // PINOS DO NEMA (Ajustados para não conflitar)
@@ -37,12 +37,18 @@ AccelStepper stepper(1, NEMA_STEP, NEMA_DIR);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-char ssid[] = ""; //
-char pass[] = ""; //
+char ssid[] = ""; //"";
+char pass[] = ""; //"";
 const char* mqtt_server = "test.mosquitto.org";
+
+// --- PROTÓTIPOS DE FUNÇÕES ---
+void reconnectMQTT();
+void atualizarTelaOLED();
+void gerenciarBotaoCronometro();
 
 // --- VARIÁVEIS VOLATILE (PARA COMPARTILHAMENTO ENTRE CORES) ---
 volatile int valor_pwm = 0;
+portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool travaEmergencia = false;
 volatile long alvoNema = 0;
 volatile int16_t encoderAcumulado = 0;
@@ -75,7 +81,7 @@ double Setpoint, Input, Output;
 // No topo, mude as constantes para 0 para garantir que o PID esteja "morto"
 // Ajuste Kp para controlar a resposta geral, Ki para eliminar o erro estacionário, e Kd para suavizar a resposta.
 // kd faz o motor balançar muito, qndo aumenta, em 3k rpm
-double Kp=0.48, Ki=0.05, Kd=0.001; 
+double Kp=0.0, Ki=0.0, Kd=0.0; 
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 
 // ================================================================
@@ -83,7 +89,7 @@ PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 // ================================================================
 void TaskMotores(void * pvParameters) {
     const int PULSOS_POR_VOLTA = 6;
-    const int TEMPO_MEDICAO_MS = 20; 
+    const int TEMPO_MEDICAO_MS = 50; 
     static unsigned long ultimoTempoRPM = 0;
     static bool motorEstavaParado = true;
 
@@ -104,54 +110,72 @@ void TaskMotores(void * pvParameters) {
             unsigned long agora = millis();
             if (agora - ultimoTempoRPM >= TEMPO_MEDICAO_MS) {
                 ultimoTempoRPM = agora;
-                noInterrupts();
+
+                // --- PROTEÇÃO DO FG (Freq. Generator) ---
+                portENTER_CRITICAL(&mux); 
                 unsigned long pulsos = contadorPulsosFG;
                 contadorPulsosFG = 0;
-                interrupts();
+                portEXIT_CRITICAL(&mux); 
 
                 double tempoSeg = (double)TEMPO_MEDICAO_MS / 1000.0;
                 double rpmBruto = (pulsos / tempoSeg) * (60.0 / (double)PULSOS_POR_VOLTA);
 
-                // Filtro 98/02 para o PID não "chutar" o motor
-                Input = (Input * 0.98) + (rpmBruto * 0.02);
-                rpmExibicao = (Input * 0.99) + (rpmBruto * 0.01);
+                Input = (Input * 0.90) + (rpmBruto * 0.10);
+                rpmExibicao = (Input * 0.92) + (rpmBruto * 0.08);
             }
-            double alvoFinal = map(valor_pwm, 0, 255, 0, 6400);
 
-            // Rampa: se o setpoint suave for menor que o alvo, sobe aos poucos
+            double alvoFinal = map(valor_pwm, 0, 255, 0, 5000);
+
             if (setpointSuave < alvoFinal) {
-                setpointSuave += 2; // Ajuste este valor para mais rápido ou mais devagar
+                setpointSuave += 2; 
                 if (setpointSuave > alvoFinal) setpointSuave = alvoFinal;
             } else if (setpointSuave > alvoFinal) {
                 setpointSuave -= 2;
                 if (setpointSuave < alvoFinal) setpointSuave = alvoFinal;
             }
 
-            Setpoint = setpointSuave; 
+            Setpoint = setpointSuave;
+            
+            static bool modoBaixaRPM = false;
+            if (Setpoint < 3500 && !modoBaixaRPM) {
+                myPID.SetTunings(0.12, 0.01, 0.005); 
+                modoBaixaRPM = true;
+            } else if (Setpoint >= 3500 && modoBaixaRPM) {
+                myPID.SetTunings(0.30, 0.08, 0.001); 
+                modoBaixaRPM = false;
+            }
+            
             myPID.Compute();
             
-
-            // LÓGICA DIRETA PARA O 6N136:
-            // Output alto (ESP32 em 3.3V) -> Opto satura -> Fio Branco vai a 0V -> MOTOR ACELERA
             int pwmFinal = (int)Output; 
             if (valor_pwm < 10) {
                 ledcWrite(PWM_CHANNEL, 0); 
                 motorEstavaParado = true;
                 setpointSuave = 0;
             } else {
-                // Garante que o motor sempre receba pelo menos o mínimo para girar firme
                 ledcWrite(PWM_CHANNEL, constrain(pwmFinal, 25, 255));
             }
 
         } else {
-            // ESTADO PARADO: 
-            // Mandamos 0 para o ESP32 -> Opto corta -> Pull-up joga 12V no motor -> MOTOR PARA
             ledcWrite(PWM_CHANNEL, 0); 
             motorEstavaParado = true;
             Input = 0;
             Output = 0;
             setpointSuave = 0;
         }
+
+        // --- PROTEÇÃO DO ENCODER (KY-040) ---
+        if (encoderAcumulado != 0 && !travaEmergencia) {
+            portENTER_CRITICAL(&mux);
+            int passos = encoderAcumulado;
+            encoderAcumulado = 0;
+            portEXIT_CRITICAL(&mux);
+
+            valor_pwm = constrain(valor_pwm + (passos * 5), 0, 255);
+            Setpoint = map(valor_pwm, 0, 255, 0, 5000);
+            precisaAtualizarOLED = true;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(2));
     }
 }
@@ -162,12 +186,12 @@ void TaskMotores(void * pvParameters) {
 
 // --- V1: SLIDER DE VELOCIDADE ---
 BLYNK_WRITE(V1) {
-    int rpmRecebido = param.asInt(); 
-    int novo_pwm = map(rpmRecebido, 0, 6400, 0, 255);
+    int percentual = param.asInt(); 
+    int novo_pwm = map(percentual, 0, 100, 0, 255);
 
     if (novo_pwm != valor_pwm) {
         valor_pwm = novo_pwm;
-        Setpoint = (double)rpmRecebido;
+        Setpoint = map(percentual, 0, 100, 0, 5000);
         precisaAtualizarOLED = true;
     }
 }
@@ -246,27 +270,42 @@ void IRAM_ATTR tratarEncoderNema() {
 
 void atualizarTelaOLED() {
     u8g2.clearBuffer();
+    
+    // Cabeçalho
     u8g2.setFont(u8g2_font_6x12_tf);
     u8g2.drawStr(0, 12, "HOMOGENEIZADOR");
     u8g2.drawHLine(0, 15, 128);
 
+    // Exibição do Cronômetro
     u8g2.setFont(u8g2_font_helvB14_tf);
     u8g2.setCursor(0, 45);
     
     int m = tempoRestanteSegundos / 60;
     int s = tempoRestanteSegundos % 60;
-    u8g2.print("Tempo: ");
+    u8g2.print("Tempo: "); // Abreviei para sobrar espaço para os números
     if (m < 10) u8g2.print("0"); u8g2.print(m);
     u8g2.print(":");
     if (s < 10) u8g2.print("0"); u8g2.print(s);
 
+    // Exibição do RPM REAL (O que vem do sensor FG)
     u8g2.setCursor(0, 80);
-    int rpm_preview = map(valor_pwm, 0, 255, 0, 6400);
-    u8g2.print("RPM: "); u8g2.print((int)rpmExibicao);
+    u8g2.print("RPM: "); 
+    
+    // Usamos o rpmExibicao que é calculado no Core 0
+    // Adicionamos uma trava visual: se o PWM for 0, forçamos o visor a mostrar 0
+    if (valor_pwm < 10) {
+        u8g2.print("0");
+    } else {
+        u8g2.print((int)rpmExibicao);
+    }
 
+    // Barra de Progresso do Tempo (Visual)
+    // Moldura da barra
     u8g2.drawFrame(0, 110, 120, 10);
+    // Preenchimento proporcional aos 600 segundos (10 min)
     int barWidth = map(constrain(tempoRestanteSegundos, 0, 600), 0, 600, 0, 118);
     u8g2.drawBox(1, 111, barWidth, 8);
+    
     u8g2.sendBuffer();
 }
 
@@ -278,6 +317,53 @@ void IRAM_ATTR contarFG() {
     if (agoraMicros - ultimoMicros > 1200) { 
         contadorPulsosFG++;
         ultimoMicros = agoraMicros;
+    }
+}
+
+void TaskInternet(void * pvParameters) {
+    static int ultimoMinutoEnviado = -1;
+    static int ultimoRPMEnviadoApp = -1;
+    static int ultimoPercentualEnviado = -1;
+
+    for(;;) {
+        if (WiFi.status() == WL_CONNECTED) {
+            Blynk.run();
+            mqttClient.loop();
+
+            // 1. ENVIO DO TEMPO (Econômico: apenas quando muda o minuto)
+            // Arredondamos para cima: 9min e 1s aparece como 10min no App
+            int minutosRestantes = (tempoRestanteSegundos + 59) / 60; 
+            if (tempoRestanteSegundos == 0) minutosRestantes = 0; // Garante o zero no fim
+
+            if (minutosRestantes != ultimoMinutoEnviado) {
+                Blynk.virtualWrite(V0, minutosRestantes);
+                ultimoMinutoEnviado = minutosRestantes;
+            }
+
+            // 2. FEEDBACK DO SLIDER (0-100%)
+            // Sincroniza o Slider do celular se você girar o botão físico (KY-040)
+            int percentualAtual = map(valor_pwm, 0, 255, 0, 100);
+            if (percentualAtual != ultimoPercentualEnviado) {
+                Blynk.virtualWrite(V1, percentualAtual);
+                ultimoPercentualEnviado = percentualAtual;
+            }
+
+            // 3. ENVIO DO RPM REAL (Com Histerese de 15 RPM para evitar spam)
+            int rpmAtualInt = (int)rpmExibicao;
+            if (abs(rpmAtualInt - ultimoRPMEnviadoApp) > 15) {
+                Blynk.virtualWrite(V2, rpmAtualInt); 
+                ultimoRPMEnviadoApp = rpmAtualInt;
+            }
+
+            // 4. MANUTENÇÃO MQTT
+            if (!mqttClient.connected()) {
+                reconnectMQTT();
+            }
+        }
+        
+        // Delay de 15ms é o "ponto doce" para manter o App responsivo 
+        // sem estressar o processador ou a pilha do Wi-Fi
+        vTaskDelay(pdMS_TO_TICKS(15)); 
     }
 }
 
@@ -298,7 +384,7 @@ void setup() {
 
     // PID CONFIG FIXA (NÃO MUDA MAIS NO LOOP)
     myPID.SetMode(AUTOMATIC);
-    myPID.SetSampleTime(20);      // igual janela RPM (50ms)
+    myPID.SetSampleTime(50);      // igual janela RPM (50ms)
     myPID.SetOutputLimits(0, 255);
 
     // Nema 17
@@ -337,6 +423,8 @@ void setup() {
         NULL,
         0
     );
+    // Criar a tarefa da Internet no Core 1
+    xTaskCreatePinnedToCore(TaskInternet, "TaskInternet", 10000, NULL, 1, NULL, 1);
 
     atualizarTelaOLED();
     Serial.println("Sistema Dual Core Pronto!");
@@ -379,115 +467,52 @@ void gerenciarBotaoCronometro() {
 }
 
 void loop() {
-    // 1. MANUTENÇÃO DE REDE
-    if (WiFi.status() == WL_CONNECTED) {
-        Blynk.run();
-        mqttClient.loop();
+  // 1. INTERFACE LOCAL: BOTÃO DO ENCODER (START/STOP)
+  // Como o delay(50) do debounce está aqui, ele não afeta o PID que está no Core 0
+  gerenciarBotaoCronometro(); 
+
+  // 2. MOVIMENTAÇÃO DO NEMA 17 (EIXO Z)
+  // O loop processa o pedido de movimento vindo da interrupção do encoder 2
+  if (nemaPrecisaMover) {
+    stepper.moveTo(alvoNema); 
+    nemaPrecisaMover = false;
+  }
+
+  // 3. ATUALIZAÇÃO DA TELA OLED
+  // Só redesenha se houver mudança (economiza processamento)
+  if (precisaAtualizarOLED) {
+    atualizarTelaOLED();
+    precisaAtualizarOLED = false;
+  }
+
+  unsigned long tempoAtual = millis();
+  
+  // 4. TIMER DE 1 SEGUNDO: LÓGICA DO CRONÔMETRO
+  // Rodando no loop para garantir que a contagem no OLED seja fluida
+  if (tempoAtual - tempoAnteriorBlynk >= 500) {
+    tempoAnteriorBlynk = tempoAtual;
+
+    if (cronometroRodando && tempoRestanteSegundos > 0 && valor_pwm > 0) {
+      tempoRestanteSegundos--;
+      precisaAtualizarOLED = true;
+
+      if (tempoRestanteSegundos <= 0) {
+        tempoRestanteSegundos = 0;
+        valor_pwm = 0;
+        cronometroRodando = false;
+        // A atualização para o Blynk será feita pela TaskInternet ao ler essa variável
+      }
     }
-    
-    // 2. INTERFACE LOCAL (BOTÃO DO ENCODER)
-    gerenciarBotaoCronometro(); 
+  }
 
-    // 3. ATUALIZAÇÃO DO SETPOINT VIA ENCODER FÍSICO
-    if (encoderAcumulado != 0 && !travaEmergencia) {
-        noInterrupts();
-        int passos = encoderAcumulado;
-        encoderAcumulado = 0;
-        interrupts();
-
-        valor_pwm += (passos * 5);
-        valor_pwm = constrain(valor_pwm, 0, 255);
-        
-        Setpoint = map(valor_pwm, 0, 255, 0, 6400); 
-        precisaAtualizarOLED = true;
-    }
-
-    // 4. MOVIMENTAÇÃO DO NEMA 17 (EIXO Z)
-    if (nemaPrecisaMover) {
-        stepper.moveTo(alvoNema); 
-        nemaPrecisaMover = false;
-    }
-
-    // 5. ATUALIZAÇÃO DA TELA OLED
-    if (precisaAtualizarOLED) {
-        atualizarTelaOLED();
-        precisaAtualizarOLED = false;
-    }
-
-    unsigned long tempoAtual = millis();
-    
-    // 6. TIMER DE 1 SEGUNDO: TELEMETRIA (BLYNK E CRONÔMETRO)
-    if (tempoAtual - tempoAnteriorBlynk >= 1000) {
-        tempoAnteriorBlynk = tempoAtual;
-
-        // --- Lógica do Cronômetro ---
-        if (cronometroRodando && tempoRestanteSegundos > 0 && valor_pwm > 0) {
-            tempoRestanteSegundos--;
-            precisaAtualizarOLED = true;
-
-            if (tempoRestanteSegundos <= 0) {
-                tempoRestanteSegundos = 0;
-                valor_pwm = 0;
-                cronometroRodando = false;
-                if (WiFi.status() == WL_CONNECTED) Blynk.virtualWrite(V4, 0); 
-            }
-        }
-
-        // --- Comunicação Blynk (Otimizada para economizar cota de 100k) ---
-        if (WiFi.status() == WL_CONNECTED) {
-            
-            // Trava de economia para o RPM Real (V2)
-            static int ultimoRPMEnviadoApp = -1;
-            int rpmAtualInt = (int)rpmExibicao;
-            
-            // Só envia o RPM real se mudar mais de 10 unidades (Histerese)
-            if (abs(rpmAtualInt - ultimoRPMEnviadoApp) > 10) {
-                Blynk.virtualWrite(V2, rpmAtualInt); 
-                ultimoRPMEnviadoApp = rpmAtualInt;
-            }
-
-            // Atualiza o valor do Slider apenas se houver mudança manual
-            if (valor_pwm != ultimoPWMEnviado) {
-                int rpm_para_slider = map(valor_pwm, 0, 255, 0, 6400);
-                Blynk.virtualWrite(V1, rpm_para_slider); 
-                ultimoPWMEnviado = valor_pwm;
-            }
-            
-            // Atualiza o Cronômetro
-            if (tempoRestanteSegundos != ultimoTempoEnviado) {
-                int minutos = tempoRestanteSegundos / 60;
-                int segundos = tempoRestanteSegundos % 60;
-                char tempoFormatado[10];
-                sprintf(tempoFormatado, "%02d:%02d", minutos, segundos);
-
-                Blynk.virtualWrite(V0, tempoFormatado); 
-                ultimoTempoEnviado = tempoRestanteSegundos;
-            }
-        }
-
-        // --- Comunicação MQTT ---
-        if (mqttClient.connected()) {
-            StaticJsonDocument<128> mqttDoc;
-            mqttDoc["tempo"] = tempoRestanteSegundos;
-            mqttDoc["pwm"] = valor_pwm;
-            mqttDoc["rpm_real"] = (int)rpmExibicao;
-            mqttDoc["status"] = travaEmergencia ? "ALERTA" : (cronometroRodando ? "RODANDO" : "STOP");
-            mqttDoc["z_pos"] = stepper.currentPosition();
-
-            char buffer[128];
-            serializeJson(mqttDoc, buffer);
-            mqttClient.publish("ifsudestemg/homogeneizador/dados", buffer);
-        }
-    }
-
-    // 7. TIMER DE 0.5 SEGUNDOS: MONITOR SERIAL (DEBUG LOCAL - NÃO GASTA COTA)
-    if (tempoAtual - tempoAnteriorSerial >= 500) { 
-        tempoAnteriorSerial = tempoAtual;
-        Serial.print("> PWM User: "); Serial.print(valor_pwm);
-        Serial.print(" | PWM PID (Output): "); Serial.print(Output); 
-        Serial.print(" | Setpoint: "); Serial.print((int)Setpoint);
-        Serial.print(" | RPM Real: "); Serial.print(Input);
-        Serial.print(" | RPM OLED: "); Serial.print((int)rpmExibicao);
-        Serial.print(" | Tempo: "); Serial.println(tempoRestanteSegundos);
-    }
+  // 5. MONITOR SERIAL (DEBUG LOCAL)
+  // Essencial para validar o sistema sem depender da internet
+  if (tempoAtual - tempoAnteriorSerial >= 500) { 
+    tempoAnteriorSerial = tempoAtual;
+    Serial.print("> PWM User: "); Serial.print(valor_pwm);
+    Serial.print(" | Setpoint: "); Serial.print((int)Setpoint);
+    Serial.print(" | RPM Real: "); Serial.print((int)rpmExibicao);
+    Serial.print(" | Tempo: "); Serial.println(tempoRestanteSegundos);
+    precisaAtualizarOLED = true;
+  }
 }
