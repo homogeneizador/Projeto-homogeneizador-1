@@ -1,6 +1,6 @@
-#define BLYNK_TEMPLATE_ID   ""
+#define BLYNK_TEMPLATE_ID   "T"
 #define BLYNK_TEMPLATE_NAME "Homogeneizador"
-#define BLYNK_AUTH_TOKEN    ""
+#define BLYNK_AUTH_TOKEN    "P"
 
 #include <Arduino.h>
 #include <U8g2lib.h>
@@ -37,8 +37,8 @@ AccelStepper stepper(1, NEMA_STEP, NEMA_DIR);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-char ssid[] = ""; //"";
-char pass[] = ""; //"";
+char ssid[] = "G"; // "t";
+char pass[] = "h"; //"9";
 const char* mqtt_server = "test.mosquitto.org";
 
 // --- PROTÓTIPOS DE FUNÇÕES ---
@@ -89,7 +89,7 @@ PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 // ================================================================
 void TaskMotores(void * pvParameters) {
     const int PULSOS_POR_VOLTA = 6;
-    const int TEMPO_MEDICAO_MS = 50; 
+    const int TEMPO_MEDICAO_MS = 100; 
     static unsigned long ultimoTempoRPM = 0;
     static bool motorEstavaParado = true;
 
@@ -120,14 +120,14 @@ void TaskMotores(void * pvParameters) {
                 double tempoSeg = (double)TEMPO_MEDICAO_MS / 1000.0;
                 double rpmBruto = (pulsos / tempoSeg) * (60.0 / (double)PULSOS_POR_VOLTA);
 
-                Input = (Input * 0.90) + (rpmBruto * 0.10);
-                rpmExibicao = (Input * 0.92) + (rpmBruto * 0.08);
+                Input = (Input * 0.95) + (rpmBruto * 0.05);
+                rpmExibicao = (Input * 0.97) + (rpmBruto * 0.03);
             }
 
-            double alvoFinal = map(valor_pwm, 0, 255, 0, 5000);
+            double alvoFinal = map(valor_pwm, 0, 255, 0, 2000);
 
             if (setpointSuave < alvoFinal) {
-                setpointSuave += 2; 
+                setpointSuave += 1; 
                 if (setpointSuave > alvoFinal) setpointSuave = alvoFinal;
             } else if (setpointSuave > alvoFinal) {
                 setpointSuave -= 2;
@@ -137,11 +137,11 @@ void TaskMotores(void * pvParameters) {
             Setpoint = setpointSuave;
             
             static bool modoBaixaRPM = false;
-            if (Setpoint < 3500 && !modoBaixaRPM) {
-                myPID.SetTunings(0.12, 0.01, 0.005); 
+            if (Setpoint < 2200 && !modoBaixaRPM) {
+                myPID.SetTunings(0.10, 0.01, 0.005); 
                 modoBaixaRPM = true;
-            } else if (Setpoint >= 3500 && modoBaixaRPM) {
-                myPID.SetTunings(0.30, 0.08, 0.001); 
+            } else if (Setpoint >= 2200 && modoBaixaRPM) {
+                myPID.SetTunings(0.25, 0.05, 0.001); 
                 modoBaixaRPM = false;
             }
             
@@ -153,7 +153,7 @@ void TaskMotores(void * pvParameters) {
                 motorEstavaParado = true;
                 setpointSuave = 0;
             } else {
-                ledcWrite(PWM_CHANNEL, constrain(pwmFinal, 25, 255));
+                ledcWrite(PWM_CHANNEL, constrain(pwmFinal, 30, 255));
             }
 
         } else {
@@ -172,7 +172,7 @@ void TaskMotores(void * pvParameters) {
             portEXIT_CRITICAL(&mux);
 
             valor_pwm = constrain(valor_pwm + (passos * 5), 0, 255);
-            Setpoint = map(valor_pwm, 0, 255, 0, 5000);
+            Setpoint = map(valor_pwm, 0, 255, 0, 2000);
             precisaAtualizarOLED = true;
         }
 
@@ -186,26 +186,29 @@ void TaskMotores(void * pvParameters) {
 
 // --- V1: SLIDER DE VELOCIDADE ---
 BLYNK_WRITE(V1) {
-    int percentual = param.asInt(); 
-    int novo_pwm = map(percentual, 0, 100, 0, 255);
+    int valorRecebido = param.asInt();
+    
+    valorRecebido = constrain(valorRecebido, 0, 2000); 
+    
+    // Mapeia direto de 0-2000 RPM para o PWM (0-255)
+    int novo_pwm = map(valorRecebido, 0, 2000, 0, 255);
 
     if (novo_pwm != valor_pwm) {
         valor_pwm = novo_pwm;
-        Setpoint = map(percentual, 0, 100, 0, 5000);
+        Setpoint = valorRecebido;
         precisaAtualizarOLED = true;
     }
 }
-
 BLYNK_WRITE(V3) {
     bool estadoBotao = (param.asInt() == 1);
     if (estadoBotao) {
         travaEmergencia = true;
         valor_pwm = 0;
-        ledcWrite(PWM_CHANNEL, 255);
+        ledcWrite(PWM_CHANNEL, 0);
         Serial.println("!!! EMERGÊNCIA ATIVA !!!");
     } else {
         travaEmergencia = false;
-        ledcWrite(PWM_CHANNEL, 255);
+        
         Serial.println("Sistema liberado.");
     }
     precisaAtualizarOLED = true;
@@ -342,7 +345,7 @@ void TaskInternet(void * pvParameters) {
 
             // 2. FEEDBACK DO SLIDER (0-100%)
             // Sincroniza o Slider do celular se você girar o botão físico (KY-040)
-            int percentualAtual = map(valor_pwm, 0, 255, 0, 100);
+            int percentualAtual = map(valor_pwm, 0, 255, 0, 2000);
             if (percentualAtual != ultimoPercentualEnviado) {
                 Blynk.virtualWrite(V1, percentualAtual);
                 ultimoPercentualEnviado = percentualAtual;
@@ -384,7 +387,7 @@ void setup() {
 
     // PID CONFIG FIXA (NÃO MUDA MAIS NO LOOP)
     myPID.SetMode(AUTOMATIC);
-    myPID.SetSampleTime(50);      // igual janela RPM (50ms)
+    myPID.SetSampleTime(100);      // igual janela RPM (50ms)
     myPID.SetOutputLimits(0, 255);
 
     // Nema 17
@@ -489,7 +492,7 @@ void loop() {
   
   // 4. TIMER DE 1 SEGUNDO: LÓGICA DO CRONÔMETRO
   // Rodando no loop para garantir que a contagem no OLED seja fluida
-  if (tempoAtual - tempoAnteriorBlynk >= 500) {
+  if (tempoAtual - tempoAnteriorBlynk >= 1000) {
     tempoAnteriorBlynk = tempoAtual;
 
     if (cronometroRodando && tempoRestanteSegundos > 0 && valor_pwm > 0) {
@@ -507,7 +510,7 @@ void loop() {
 
   // 5. MONITOR SERIAL (DEBUG LOCAL)
   // Essencial para validar o sistema sem depender da internet
-  if (tempoAtual - tempoAnteriorSerial >= 500) { 
+  if (tempoAtual - tempoAnteriorSerial >= 1000) { 
     tempoAnteriorSerial = tempoAtual;
     Serial.print("> PWM User: "); Serial.print(valor_pwm);
     Serial.print(" | Setpoint: "); Serial.print((int)Setpoint);
