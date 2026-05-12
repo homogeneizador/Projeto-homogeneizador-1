@@ -12,15 +12,6 @@
 > char pass[] = "SENHA_DA_REDE";     // Substitua pela senha do Wi-Fi
 > ```
 
-## 🌐 Monitoramento Web (Live Dashboard)
-
-O projeto conta com um dashboard estático hospedado via **GitHub Pages**, que permite o acompanhamento em tempo real sem a necessidade de instalação de softwares adicionais.
-
-* **URL do Dashboard:** https://homogeneizador.github.io/Projeto-homogeneizador-1/
-* **Broker:** `test.mosquitto.org` (WebSockets)
-* **Tópico:** `ifsudestemg/homogeneizador/dados`
----
-
 ## 📌 Visão Geral do Projeto
 Este projeto faz parte do desenvolvimento de um **Homogeneizador de Leite Materno** para UTIs Neonatais, integrando hardware de precisão com monitoramento via IoT.
 
@@ -119,44 +110,21 @@ As seguintes bibliotecas são necessárias. Se estiver usando PlatformIO, elas s
 | **PubSubClient** | ^2.8 | Protocolo de comunicação MQTT |
 
 ### 3. Configuração do Arquivo `platformio.ini`
-Caso utilize o VS Code, configure seu arquivo de projeto conforme abaixo:
-
-```ini
-[env:esp32dev]
-platform = espressif32
-board = esp32dev
-framework = arduino
-monitor_speed = 115200
-lib_deps =
-    blynkkk/Blynk @ ^1.3.2
-    olikraus/U8g2 @ ^2.35.19
-    bblanchon/ArduinoJson @ ^6.21.3
-    knolleary/PubSubClient @ ^2.8
-```
+Caso utilize o VS Code, configure seu arquivo.
 
 ## 📱 Interface IoT (Blynk)
 
-O controle e a telemetria remota são realizados através da plataforma **Blynk IoT**. Para o funcionamento correto do firmware, o seu Dashboard no Blynk (Web ou Mobile) deve conter os seguintes **Datastreams**:
+O controle e a telemetria remota são realizados através da plataforma **Blynk IoT**. Para o funcionamento correto do firmware, configure o seu Dashboard no Blynk (Web ou Mobile).
 
-### Configuração de Datastreams (Virtual Pins)
-
-| Pino Virtual | Nome do Datastream | Tipo de Dado | Valor (Min - Max) | Função |
-| :--- | :--- | :--- | :--- | :--- |
-| **V0** | Temperatura | Float (Dec. 1) | 0 - 50 | Exibe a temperatura simulada/lida. |
-| **V1** | Controle PWM | Integer | 0 - 255 | Slider para controle manual da velocidade. |
-| **V2** | Rotação (RPM) | Integer | 0 - 7000 | Exibe o cálculo de RPM Real (Fio Amarelo). |
-| **V3** | Emergência | Integer | 0 - 1 | Botão (Switch) para parada imediata. |
-
----
 
 ### 🚀 Funcionalidades do Aplicativo
 
 1. **Monitoramento em Tempo Real:** Visualização da temperatura e do RPM real do motor diretamente no smartphone.
 2. **Controle Híbrido:** O Slider no aplicativo sincroniza automaticamente com o Encoder Físico (KY-040). Se você girar o botão no hardware, o Slider no celular se move, e vice-versa.
 3. **Segurança Crítica:** O botão de **Emergência (V3)** tem prioridade máxima no código. Uma vez ativado via App, o PWM é zerado no hardware e o processamento do encoder é bloqueado até que a trava seja liberada.
-4. **Notificações:** O sistema está configurado para disparar um evento de log (`emergencia`) sempre que a parada brusca for acionada, permitindo auditoria de uso.
+4. **Notificações:** O sistema será configurado para disparar um evento de log (`emergencia`) sempre que a parada brusca for acionada, permitindo auditoria de uso.
 
-> **Dica de Configuração:** No Widget do Slider (V1), habilite a opção **"Send Values on Release"** como "OFF" se desejar um controle fluido e instantâneo, ou "ON" para economizar dados e evitar latência em redes instáveis (como a do campus).
+> **Dica de Configuração:** No Widget do Slider (V1), habilite a opção **"Send Values on Release"** como "OFF" se desejar um controle fluido e instantâneo, ou "ON" para economizar dados e evitar latência em redes instáveis.
 
 ## 🧠 Lógica de Controle e Telemetria
 
@@ -194,6 +162,5 @@ O sistema implementa uma sincronização bidirecional:
 ---
 
 ## 📈 Possíveis Melhorias (Roadmap)
-* Implementação de controle **PID** para manter o RPM constante sob carga.
 * Adição de sensor de temperatura real (DS18B20) para monitoramento do leite.
 * Interface Web nativa (Webserver) para operação sem dependência de internet externa.
